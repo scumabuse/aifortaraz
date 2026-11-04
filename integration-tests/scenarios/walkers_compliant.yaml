@@ -1,0 +1,78 @@
+# Root integration scenario (walkers_compliant); zones come from the website config in the tests.
+name: walkers_compliant
+frame_size:
+- 1280
+- 720
+fps: 10
+start_utc: '2026-11-03T09:00:00Z'
+camera_id: cam-1
+timezone: Asia/Yekaterinburg
+description: Two fully equipped workers walk back and forth; no event is expected.
+duration_s: 60
+config:
+  thresholds:
+    confirm_frames: 6
+    cooldown_sec: 20
+    min_confidence: 0.5
+  ppe_types:
+  - helmet
+  - vest
+  - glasses
+  - gloves
+  - mask
+  - boots
+  - earmuffs
+  - harness
+  - face_shield
+  zones:
+  - id: zone-a
+    name: Zone A
+    type: ppe
+    polygon:
+    - - 0.2
+      - 0.15
+    - - 0.8
+      - 0.15
+    - - 0.8
+      - 0.98
+    - - 0.2
+      - 0.98
+    rules:
+      required_ppe:
+      - helmet
+      - vest
+tracks:
+- id: 41
+  label: person
+  conf: 0.92
+  keyframes:
+  - t: 0
+    feet:
+    - 0.3
+    - 0.94
+    height: 0.5
+    pose: walking
+    ppe:
+      helmet: present
+      vest: present
+  - t: 30
+    feet:
+    - 0.7
+    - 0.94
+  - t: 59.9
+    feet:
+    - 0.3
+    - 0.94
+- id: 42
+  label: person
+  conf: 0.92
+  keyframes:
+  - t: 0
+    feet:
+    - 0.75
+    - 0.9
+    height: 0.45
+    pose: standing
+    ppe:
+      helmet: present
+      vest: present

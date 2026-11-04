@@ -1,0 +1,61 @@
+# Root integration scenario (fall_outside_zones); zones come from the website config in the tests.
+name: fall_outside_zones
+frame_size:
+- 1280
+- 720
+fps: 10
+start_utc: '2026-11-03T09:00:00Z'
+camera_id: cam-1
+timezone: Asia/Yekaterinburg
+description: A worker outside every zone falls at 3 s and lies still.
+duration_s: 20
+config:
+  thresholds:
+    confirm_frames: 6
+    cooldown_sec: 20
+    min_confidence: 0.5
+  ppe_types:
+  - helmet
+  - vest
+  - glasses
+  - gloves
+  - mask
+  - boots
+  - earmuffs
+  - harness
+  - face_shield
+  zones:
+  - id: zone-a
+    name: Zone A
+    type: ppe
+    polygon:
+    - - 0.2
+      - 0.15
+    - - 0.8
+      - 0.15
+    - - 0.8
+      - 0.98
+    - - 0.2
+      - 0.98
+    rules:
+      required_ppe:
+      - helmet
+tracks:
+- id: 31
+  label: person
+  conf: 0.92
+  keyframes:
+  - t: 0
+    feet:
+    - 0.08
+    - 0.92
+    height: 0.6
+    pose: standing
+    ppe:
+      helmet: present
+  - t: 3.0
+    pose: standing
+  - t: 3.3
+    pose: falling
+  - t: 3.6
+    pose: lying

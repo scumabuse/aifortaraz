@@ -195,4 +195,34 @@ def load_yaml(path: Path) -> Any:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-__all__ = ["AI", "Backend", "ai_process", "dump_json", "free_port", "load_yaml", "poll", "start_backend"]
+__all__ = ["AI", "SCENARIOS", "Backend", "ManagedProcess", "ai_process", "dump_json", "free_port", "keep_logs",
+           "load_yaml", "poll", "start_backend", "wait_http"]
+
+
+@pytest.fixture
+def ai_runner() -> Iterator[Any]:
+    """Start AI modules (support.AiRunner); every module is stopped and removed at teardown."""
+    from support import AiRunner  # noqa: PLC0415
+
+    runner = AiRunner()
+    try:
+        yield runner
+    finally:
+        runner.cleanup()
+
+
+@pytest.fixture
+def live_factory() -> Iterator[Callable[..., Any]]:
+    """Open /ws/live recorders (support.LiveSocket); closed at teardown."""
+    from support import LiveSocket  # noqa: PLC0415
+
+    sockets: list[Any] = []
+
+    def make(backend: Backend, cameras: list[str]) -> Any:
+        sock = LiveSocket(backend, cameras)
+        sockets.append(sock)
+        return sock
+
+    yield make
+    for sock in sockets:
+        sock.close()

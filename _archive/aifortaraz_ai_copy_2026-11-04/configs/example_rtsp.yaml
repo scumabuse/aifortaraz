@@ -1,0 +1,116 @@
+# Example service configuration with two RTSP cameras. It lists every option of the local
+# configuration (spec 7.2; models in safety_ai/config/models.py). Unless a comment says otherwise,
+# the value shown is the built-in default, so any line can be deleted.
+#
+#   safety-ai run --config configs/example_rtsp.yaml
+#
+# Precedence: CLI flags > environment > this file > built-in defaults.
+#   * ${VAR} and ${VAR:-default} in string values are expanded from the environment and from
+#     .env; an unset variable without a default becomes "" ($${ writes a literal ${).
+#   * Any option can be overridden with SAFETY_AI_<SECTION>__<KEY>, list items by index:
+#       SAFETY_AI_TELEMETRY__LOG_LEVEL=DEBUG
+#       SAFETY_AI_CAMERAS__1__SOURCE=rtsp://192.168.1.12:554/live
+#     Values are parsed as YAML (true, 12, [a, b]); text settings keep the raw text.
+#   * SAFETY_AI_BACKEND_URL and SAFETY_AI_API_KEY (integration contract) set backend.url and
+#     backend.api_key.
+#   * An invalid value prints one "config error: <setting>: <problem>" line per problem and the
+#     process exits with status 2.
+#
+# Zones and rules are never configured here: they come from the website backend
+# (GET /api/v1/ingest/config/<camera_id>) and are cached in cache/config_<camera_id>.json.
+
+backend:
+  # Website backend base URL (http:// or https://; a trailing slash is removed).
+  url: ${SAFETY_AI_BACKEND_URL:-http://localhost:8000}
+  # Sent as X-API-Key on every request. Keep the key in the environment or .env, never in this
+  # file; an empty value means "no key". It is masked (****) in every log line.
+  api_key: ${SAFETY_AI_API_KEY}
+  ws: true                 # one WebSocket connection per process (detections, frames, heartbeats)
+  push_frames: false       # also push annotated JPEG frames over the WebSocket (contract 4.6)
+  timeout_s: 5             # timeout of every HTTP request in seconds (0 < t <= 120)
+  enabled: true            # false: no backend at all; events are printed and written to events/
+
+models:
+  ppe: ppe_s_latest        # registry name of the PPE + vehicle detector (models/registry.json)
+  pose: pose_n             # registry name of the pose model (falls and immobility)
+  vehicle: same_as_ppe     # same_as_ppe, or the registry name of a COCO model (car/truck/bus)
+  backend: auto            # auto | pt | onnx | openvino | tensorrt (auto: fastest in bench.json)
+  device: auto             # auto | cpu | cuda | cuda:N | mps | N (a GPU index)
+  imgsz: 640               # detector input size, a multiple of 32
+  half: true               # FP16 inference on CUDA
+  tracker: bytetrack       # bytetrack | botsort
+  class_conf:              # per-class confidence overrides, 0..1 (default: none, i.e. {})
+    harness: 0.35
+    forklift: 0.4
+  pose_imgsz: 320          # pose model input size for person crops, a multiple of 32
+  registry: models/registry.json
+
+thresholds:
+  # Local defaults; the zone values and the backend's thresholds take precedence.
+  conf: 0.25               # detector confidence threshold
+  iou: 0.5                 # detector NMS IoU threshold
+  confirm_frames: 8        # frames a condition must hold before an event starts
+  cooldown_sec: 60         # seconds before the same rule key may start a new event
+  violation_on: -0.3       # smoothed PPE score at or below which an item is in violation
+  present_on: 0.1          # smoothed PPE score at or above which an item counts as present
+  track_lost_s: 3          # seconds unseen before a track is lost
+  immobile_sec: 30         # seconds lying still before person_immobile
+  min_confidence: 0.5      # persons/vehicles below this are ignored when the backend sends none
+
+processing:
+  target_fps: 12           # processed frames per second; slower models skip frames adaptively
+  pose_every_n: 10         # run the pose model for everyone every N processed frames
+  detections_max_hz: 15    # detections messages per second and camera (at most 15)
+
+output:
+  mjpeg: true              # serve annotated frames at http://<host>:<mjpeg_port>/stream/<id>.mjpeg
+  mjpeg_port: 8001
+  mjpeg_fps: 12            # at most 12
+  save_event_clips: true   # write events/<external_id>.jpg and .mp4 for every event
+  events_dir: ./events
+  events_disk_cap_gb: 2    # the oldest event artefacts are deleted above this size
+  clip_pre_s: 5            # seconds of video before the event in the clip
+  clip_post_s: 5           # seconds of video after the event in the clip
+  preview: false           # OpenCV preview window (disabled automatically without a display)
+  expose: false            # true binds the MJPEG and metrics servers to 0.0.0.0, not 127.0.0.1
+
+privacy:
+  blur_faces: false        # blur head regions in snapshots, clips and the MJPEG stream
+
+telemetry:
+  metrics_port: 9100       # GET /health and GET /metrics
+  log_level: INFO          # DEBUG | INFO | WARNING | ERROR
+  log_json: true           # JSON lines on the console (files always use JSON lines)
+  log_file: logs/safety-ai.log   # workers write logs/safety-ai-<camera_id>.log; null: no file
+  log_max_mb: 50           # rotate at this size ...
+  log_backups: 5           # ... keeping this many old files
+
+paths:
+  # Relative paths are resolved against the current directory.
+  data_dir: data
+  models_dir: models
+  cache_dir: cache         # last good backend config per camera
+  spool_dir: spool         # durable event queue (spool/events.db)
+  logs_dir: logs
+  reports_dir: reports
+  calibration_dir: calibration   # <camera_id>.json written by `safety-ai calibrate`
+
+cameras:
+  - id: cam-1              # letters, digits and _ . : - (at most 64 characters)
+    # rtsp:// or http(s):// URL, a video file, an image directory, a webcam index or
+    # fake:<scenario.yaml>. null: use the stream_url of the backend config.
+    source: rtsp://${CAM1_USER:-viewer}:${CAM1_PASSWORD}@192.168.1.10:554/Streaming/Channels/101
+    loop: false            # replay video files from the start when they end
+    fps: null              # playback rate for image directories (and an override for files)
+    timezone: Asia/Yekaterinburg   # IANA name; used only for zone schedules
+    enabled: true
+    # 3x3 image-to-ground-plane matrix (pixels -> metres) for vehicle distances. null: use
+    # calibration/cam-1.json when it exists, else the monocular heuristic.
+    homography: null
+    zones_file: null       # demo only: zones from a file instead of the backend
+
+  - id: cam-2
+    source: rtsp://192.168.1.11:554/live
+    timezone: Asia/Yekaterinburg
+    # An inline matrix wins over calibration/cam-2.json, for example:
+    # homography: [[0.012, 0.0, -3.1], [0.0, 0.041, -9.8], [0.0, 0.0011, 1.0]]

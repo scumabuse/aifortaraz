@@ -1,0 +1,201 @@
+# Camera configurations served by the strict mock backend (tools/mock_backend.py).
+#
+# Every entry has exactly the structure of the contract's GET /api/v1/ingest/config/{camera_id}
+# response (docs/CONTRACT.md 4.4) without "version" and "updated_at": the mock starts every camera
+# at version 1 and bumps it on POST /debug/reload-config and POST /debug/set-config/{camera_id}.
+# Times in schedules must be quoted ("20:00"), otherwise YAML reads them as numbers.
+#
+# Together the cameras cover every rule kind: required_ppe (all nine PPE codes, several
+# combinations including vest and harness), entry_forbidden, max_persons, min_vehicle_distance_m,
+# a weekday daytime schedule, per-zone confirm_frames / cooldown_sec overrides, severity_override,
+# camera thresholds and a restricted ppe_types list. The stream URLs are examples: the mock only
+# reports them and never opens them.
+#
+# cam-1 is the camera of the end-to-end run (1280x720 synthetic video, people across the middle
+# of the frame): a large PPE zone over almost the whole floor plus a smaller danger zone.
+
+cameras:
+  - camera:
+      id: cam-1
+      name: "Press shop, line 2 - press #2"
+      stream_url: "rtsp://192.168.10.21:554/Streaming/Channels/101"
+      stream_type: rtsp
+    frame_size_hint: [1280, 720]
+    thresholds:
+      confirm_frames: 8
+      cooldown_sec: 60
+      min_confidence: 0.5
+    ppe_types: [helmet, vest, glasses, gloves, mask, boots, earmuffs, harness, face_shield]
+    zones:
+      - id: cam1-shop-floor
+        name: "Press shop floor"
+        type: ppe
+        polygon: [[0.03, 0.10], [0.97, 0.10], [0.97, 0.99], [0.03, 0.99]]
+        rules:
+          required_ppe: [helmet, vest]
+          entry_forbidden: null
+          max_persons: null
+          min_vehicle_distance_m: null
+          schedule: null
+          confirm_frames: null
+          cooldown_sec: null
+          severity_override: null
+      - id: cam1-press-danger
+        name: "Press #2 danger area"
+        type: danger
+        polygon: [[0.62, 0.28], [0.88, 0.26], [0.90, 0.74], [0.60, 0.76]]
+        rules:
+          required_ppe: null
+          entry_forbidden: true
+          max_persons: 3
+          min_vehicle_distance_m: null
+          schedule: null
+          confirm_frames: 6
+          cooldown_sec: 30
+          severity_override: null
+
+  - camera:
+      id: cam-2
+      name: "Warehouse, loading dock 1"
+      stream_url: "rtsp://192.168.10.22:554/Streaming/Channels/101"
+      stream_type: rtsp
+    frame_size_hint: [1920, 1080]
+    thresholds:
+      confirm_frames: 10
+      cooldown_sec: 90
+      min_confidence: 0.45
+    ppe_types: [helmet, vest, glasses, gloves, mask, boots, earmuffs, harness, face_shield]
+    zones:
+      - id: cam2-forklift-aisle
+        name: "Forklift aisle"
+        type: vehicle
+        polygon: [[0.05, 0.55], [0.95, 0.55], [0.98, 0.98], [0.02, 0.98]]
+        rules:
+          required_ppe: [helmet, vest, boots]
+          entry_forbidden: null
+          max_persons: null
+          min_vehicle_distance_m: 3.0
+          schedule: null
+          confirm_frames: 4
+          cooldown_sec: null
+          severity_override: critical
+      - id: cam2-dock-staging
+        name: "Dock staging area"
+        type: counting
+        polygon: [[0.10, 0.15], [0.55, 0.15], [0.55, 0.52], [0.10, 0.52]]
+        rules:
+          required_ppe: null
+          entry_forbidden: null
+          max_persons: 4
+          min_vehicle_distance_m: null
+          schedule: null
+          confirm_frames: null
+          cooldown_sec: 120
+          severity_override: null
+      - id: cam2-dock-edge
+        name: "Dock leveller edge"
+        type: danger
+        polygon: [[0.60, 0.12], [0.92, 0.12], [0.92, 0.30], [0.60, 0.30]]
+        rules:
+          required_ppe: null
+          entry_forbidden: true
+          max_persons: null
+          min_vehicle_distance_m: null
+          schedule: null
+          confirm_frames: null
+          cooldown_sec: null
+          severity_override: null
+
+  - camera:
+      id: cam-3
+      name: "Welding bay 3"
+      stream_url: "rtsp://192.168.10.23:554/live/main"
+      stream_type: rtsp
+    frame_size_hint: [1280, 720]
+    thresholds:
+      confirm_frames: 8
+      cooldown_sec: 60
+      min_confidence: 0.5
+    ppe_types: [helmet, vest, glasses, gloves, mask, boots, face_shield]
+    zones:
+      - id: cam3-welding-booths
+        name: "Welding booths"
+        type: ppe
+        polygon: [[0.05, 0.20], [0.60, 0.18], [0.62, 0.95], [0.04, 0.95]]
+        rules:
+          required_ppe: [face_shield, gloves, boots]
+          entry_forbidden: null
+          max_persons: null
+          min_vehicle_distance_m: null
+          schedule:
+            - days: [1, 2, 3, 4, 5]
+              from: "08:00"
+              to: "20:00"
+          confirm_frames: 10
+          cooldown_sec: 120
+          severity_override: null
+      - id: cam3-grinding-station
+        name: "Grinding station"
+        type: ppe
+        polygon: [[0.66, 0.25], [0.96, 0.25], [0.96, 0.90], [0.66, 0.90]]
+        rules:
+          required_ppe: [glasses, gloves, mask]
+          entry_forbidden: null
+          max_persons: 2
+          min_vehicle_distance_m: null
+          schedule: null
+          confirm_frames: null
+          cooldown_sec: null
+          severity_override: null
+
+  - camera:
+      id: cam-4
+      name: "Assembly hall, mezzanine"
+      stream_url: "rtsp://192.168.10.24:554/h264/ch1/main/av_stream"
+      stream_type: rtsp
+    frame_size_hint: [1280, 720]
+    thresholds:
+      confirm_frames: 6
+      cooldown_sec: 45
+      min_confidence: 0.55
+    ppe_types: [helmet, vest, glasses, gloves, mask, boots, earmuffs, harness, face_shield]
+    zones:
+      - id: cam4-mezzanine-edge
+        name: "Mezzanine edge (work at height)"
+        type: ppe
+        polygon: [[0.05, 0.08], [0.70, 0.08], [0.70, 0.40], [0.05, 0.40]]
+        rules:
+          required_ppe: [helmet, harness]
+          entry_forbidden: null
+          max_persons: null
+          min_vehicle_distance_m: null
+          schedule: null
+          confirm_frames: null
+          cooldown_sec: null
+          severity_override: null
+      - id: cam4-compressor-room
+        name: "Compressor room"
+        type: ppe
+        polygon: [[0.05, 0.50], [0.45, 0.50], [0.45, 0.95], [0.05, 0.95]]
+        rules:
+          required_ppe: [earmuffs, helmet]
+          entry_forbidden: null
+          max_persons: 2
+          min_vehicle_distance_m: null
+          schedule: null
+          confirm_frames: null
+          cooldown_sec: null
+          severity_override: null
+      - id: cam4-hydraulic-lift
+        name: "Hydraulic lift pit"
+        type: danger
+        polygon: [[0.55, 0.55], [0.90, 0.52], [0.93, 0.92], [0.52, 0.94]]
+        rules:
+          required_ppe: null
+          entry_forbidden: true
+          max_persons: null
+          min_vehicle_distance_m: null
+          schedule: null
+          confirm_frames: 4
+          cooldown_sec: 30
+          severity_override: high

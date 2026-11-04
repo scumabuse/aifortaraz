@@ -1,0 +1,33 @@
+# Zones of cam-1 (data/samples/cam1.mp4: workers with and without helmet and vest) for runs
+# without a backend: safety-ai demo --zones tools/demo_zones_cam1.yaml, or cameras[].zones_file
+# with backend.enabled false. The structure is the website's GET /api/v1/ingest/config/cam-1
+# response (integration contract 4.4); camera.id is replaced by the camera the file is used for.
+# The central zone covers the image area of the demo video (the stills are pillarboxed).
+
+camera:
+  id: cam-1
+  name: "Press shop (demo video)"
+  stream_url: null
+  stream_type: file
+frame_size_hint: [1280, 720]
+thresholds:
+  confirm_frames: 8
+  cooldown_sec: 60
+  min_confidence: 0.5
+ppe_types: [helmet, vest, glasses, gloves, mask, boots, earmuffs, harness, face_shield]
+zones:
+  - id: cam1-work-area
+    name: "Work area"
+    type: ppe
+    polygon: [[0.08, 0.05], [0.92, 0.05], [0.92, 0.99], [0.08, 0.99]]
+    rules:
+      required_ppe: [helmet, vest]
+      entry_forbidden: null
+      max_persons: null
+      min_vehicle_distance_m: null
+      schedule: null
+      confirm_frames: null
+      cooldown_sec: null
+      severity_override: null
+version: 1
+updated_at: "2026-11-04T00:00:00Z"

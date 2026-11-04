@@ -1,0 +1,76 @@
+# Zones for the offline demo (make demo: safety-ai demo --source data/samples/synthetic_people.mp4
+# --zones tools/demo_zones.yaml --mjpeg --loop). Four zones cover every rule kind of the
+# integration contract: required PPE, a forbidden area, a person limit and a vehicle distance
+# (with a schedule example). The structure is the website's GET /api/v1/ingest/config/<camera>
+# response (contract 4.4); camera.id is replaced by the demo camera. Schedules use days 1..7
+# (1 = Monday) in the camera's local time; times are quoted so YAML keeps them as text.
+
+camera:
+  id: cam-1
+  name: "Demo floor"
+  stream_url: null
+  stream_type: file
+frame_size_hint: [1280, 720]
+thresholds:
+  confirm_frames: 8
+  cooldown_sec: 60
+  min_confidence: 0.5
+ppe_types: [helmet, vest, glasses, gloves, mask, boots, earmuffs, harness, face_shield]
+zones:
+  - id: demo-floor
+    name: "Shop floor (helmet and vest)"
+    type: ppe
+    polygon: [[0.05, 0.05], [0.95, 0.05], [0.95, 0.99], [0.05, 0.99]]
+    rules:
+      required_ppe: [helmet, vest]
+      entry_forbidden: null
+      max_persons: null
+      min_vehicle_distance_m: null
+      schedule: null
+      confirm_frames: null
+      cooldown_sec: null
+      severity_override: null
+  - id: demo-danger
+    name: "Press danger area (no entry)"
+    type: danger
+    polygon: [[0.62, 0.30], [0.95, 0.30], [0.95, 0.99], [0.62, 0.99]]
+    rules:
+      required_ppe: null
+      entry_forbidden: true
+      max_persons: null
+      min_vehicle_distance_m: null
+      schedule: null
+      confirm_frames: 6
+      cooldown_sec: 30
+      severity_override: high
+  - id: demo-crowd
+    name: "Staging area (at most 2 persons)"
+    type: counting
+    polygon: [[0.05, 0.20], [0.62, 0.20], [0.62, 0.99], [0.05, 0.99]]
+    rules:
+      required_ppe: null
+      entry_forbidden: null
+      max_persons: 2
+      min_vehicle_distance_m: null
+      schedule: null
+      confirm_frames: null
+      cooldown_sec: 120
+      severity_override: null
+  - id: demo-aisle
+    name: "Vehicle aisle (3 m distance)"
+    type: vehicle
+    polygon: [[0.05, 0.55], [0.95, 0.55], [0.95, 0.99], [0.05, 0.99]]
+    rules:
+      required_ppe: null
+      entry_forbidden: null
+      max_persons: null
+      min_vehicle_distance_m: 3.0
+      schedule:
+        - days: [1, 2, 3, 4, 5, 6, 7]
+          from: "00:00"
+          to: "24:00"
+      confirm_frames: 4
+      cooldown_sec: null
+      severity_override: null
+version: 1
+updated_at: "2026-11-04T00:00:00Z"

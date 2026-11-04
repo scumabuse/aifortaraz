@@ -1,0 +1,49 @@
+# File demo against the strict mock backend (the default command of the Docker images).
+#
+#   python tools/make_demo_videos.py                # builds data/samples/cam1.mp4 and cam2.mp4
+#   safety-ai mock-backend --port 8010              # terminal 1 (API key test-key)
+#   safety-ai run --config configs/demo_file.yaml   # terminal 2
+#
+# Same as configs/demo_integration.yaml, but the backend is the mock on port 8010 with its test
+# key; SAFETY_AI_BACKEND_URL and SAFETY_AI_API_KEY override both (docker-compose.yml points the
+# container at its mock-backend service). Zones and rules come from the mock's
+# tools/mock_config.yaml; the zones files apply only without a backend
+# (SAFETY_AI_BACKEND__ENABLED=false). MJPEG: http://127.0.0.1:8001/stream/cam-1.mjpeg,
+# health: http://127.0.0.1:9100/health.
+
+backend:
+  url: ${SAFETY_AI_BACKEND_URL:-http://127.0.0.1:8010}
+  api_key: ${SAFETY_AI_API_KEY:-test-key}
+  ws: true
+  push_frames: false
+
+models:
+  ppe: ppe_n_latest
+  pose: pose_n
+  vehicle: same_as_ppe
+  imgsz: 640
+  device: auto
+
+processing:
+  target_fps: 10
+
+output:
+  expose: true
+  mjpeg_port: 8001
+
+telemetry:
+  metrics_port: 9100
+
+cameras:
+  - id: cam-1
+    source: data/samples/cam1.mp4
+    # A live webcam instead of the demo video: replace the source line above with
+    # source: 0
+    loop: true
+    timezone: ${TZ:-Asia/Yekaterinburg}
+    zones_file: tools/demo_zones_cam1.yaml
+  - id: cam-2
+    source: data/samples/cam2.mp4
+    loop: true
+    timezone: ${TZ:-Asia/Yekaterinburg}
+    zones_file: tools/demo_zones_cam2.yaml

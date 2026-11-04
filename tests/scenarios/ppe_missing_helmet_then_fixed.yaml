@@ -1,0 +1,58 @@
+# Scenario 1 of spec 8.3: a worker on the press shop floor without a helmet puts it on.
+#
+# The zone geometry equals the cam-1 shop-floor zone of tools/mock_config.yaml, so the same file
+# drives the pipeline with its own config (no backend: demo, unit tests) and against the mock
+# backend, where the backend's zones replace this config (zone id cam1-shop-floor instead of
+# zone-press-floor). The person's feet stay left of the mock's danger zone.
+#
+# Timing at 10 fps with confirm_frames 8: the person is inside the zone from frame 1 (hysteresis
+# 2 in), the helmet smoothing reaches VIOLATION after 8 frames at or below -0.3 (t = 0.8 s) and
+# the event starts on that frame. The helmet is put on at t = 6.0 s; the score passes +0.1 on the
+# third present frame, the item leaves VIOLATION 8 frames later and the event ends after another
+# 8 frames without a violated item (t = 7.6 s).
+name: ppe_missing_helmet_then_fixed
+description: >
+  A worker in a vest but without a helmet stands on the press shop floor; at 6 s he puts the
+  helmet on. Exactly one ppe_violation (missing helmet, vest present) starts and ends.
+frame_size: [1280, 720]
+fps: 10
+duration_s: 12
+start_utc: "2026-11-03T09:00:00Z"
+camera_id: cam-1
+timezone: Asia/Yekaterinburg
+config:
+  thresholds: {confirm_frames: 8, cooldown_sec: 60, min_confidence: 0.5}
+  ppe_types: [helmet, vest, glasses, gloves, mask, boots, earmuffs, harness, face_shield]
+  zones:
+    - id: zone-press-floor
+      name: Press shop floor
+      type: ppe
+      polygon: [[0.03, 0.10], [0.97, 0.10], [0.97, 0.99], [0.03, 0.99]]
+      rules:
+        required_ppe: [helmet, vest]
+tracks:
+  - id: 17
+    label: person
+    conf: 0.92
+    keyframes:
+      - t: 0
+        feet: [0.30, 0.90]
+        height: 0.55
+        pose: standing
+        ppe: {helmet: missing, vest: present}
+      - {t: 6, ppe: {helmet: present}}
+expected_events:
+  - type: ppe_violation
+    zone: zone-press-floor
+    track: 17
+    start_s: 0.8
+    start_tol_s: 0.3
+    end_s: 7.6
+    end_tol_s: 0.3
+    details: {missing_ppe: [helmet], present_ppe: [vest]}
+expected_absent:
+  - {type: zone_intrusion}
+  - {type: overcrowding}
+  - {type: vehicle_proximity}
+  - {type: fall_detected}
+  - {type: person_immobile}

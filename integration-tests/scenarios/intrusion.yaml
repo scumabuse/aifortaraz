@@ -1,0 +1,75 @@
+# Root integration scenario (intrusion); zones come from the website config in the tests.
+name: intrusion
+frame_size:
+- 1280
+- 720
+fps: 10
+start_utc: '2026-11-03T09:00:00Z'
+camera_id: cam-1
+timezone: Asia/Yekaterinburg
+description: A worker walks into a forbidden zone at 3–6 s and leaves at 14 s.
+duration_s: 25
+config:
+  thresholds:
+    confirm_frames: 6
+    cooldown_sec: 20
+    min_confidence: 0.5
+  ppe_types:
+  - helmet
+  - vest
+  - glasses
+  - gloves
+  - mask
+  - boots
+  - earmuffs
+  - harness
+  - face_shield
+  zones:
+  - id: zone-a
+    name: Zone A
+    type: ppe
+    polygon:
+    - - 0.2
+      - 0.15
+    - - 0.8
+      - 0.15
+    - - 0.8
+      - 0.98
+    - - 0.2
+      - 0.98
+    rules:
+      entry_forbidden: true
+tracks:
+- id: 2
+  label: person
+  conf: 0.92
+  keyframes:
+  - t: 0
+    feet:
+    - 0.08
+    - 0.92
+    height: 0.55
+    pose: walking
+    ppe:
+      helmet: present
+      vest: present
+  - t: 3
+    feet:
+    - 0.12
+    - 0.92
+  - t: 6
+    feet:
+    - 0.5
+    - 0.92
+    pose: standing
+  - t: 12
+    feet:
+    - 0.5
+    - 0.92
+    pose: walking
+  - t: 15
+    feet:
+    - 0.06
+    - 0.92
+  - t: 16
+    visible: false

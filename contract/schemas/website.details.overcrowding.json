@@ -1,0 +1,139 @@
+{
+  "$defs": {
+    "Box": {
+      "additionalProperties": false,
+      "properties": {
+        "track_id": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": -9223372036854775808,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Track Id"
+        },
+        "label": {
+          "enum": [
+            "person",
+            "vehicle",
+            "forklift",
+            "truck",
+            "car",
+            "helmet",
+            "vest",
+            "glasses",
+            "gloves",
+            "mask",
+            "boots",
+            "earmuffs",
+            "harness",
+            "face_shield",
+            "head",
+            "face",
+            "hands",
+            "foot",
+            "ear"
+          ],
+          "title": "Label",
+          "type": "string"
+        },
+        "bbox": {
+          "maxItems": 4,
+          "minItems": 4,
+          "prefixItems": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            }
+          ],
+          "title": "Bbox",
+          "type": "array"
+        },
+        "conf": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Conf",
+          "type": "number"
+        }
+      },
+      "required": [
+        "label",
+        "bbox",
+        "conf"
+      ],
+      "title": "Box",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "boxes": {
+      "items": {
+        "$ref": "#/$defs/Box"
+      },
+      "maxItems": 200,
+      "minItems": 1,
+      "title": "Boxes",
+      "type": "array"
+    },
+    "frame_size": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "exclusiveMinimum": 0,
+          "maximum": 16384,
+          "type": "integer"
+        },
+        {
+          "exclusiveMinimum": 0,
+          "maximum": 16384,
+          "type": "integer"
+        }
+      ],
+      "title": "Frame Size",
+      "type": "array"
+    },
+    "count": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "title": "Count",
+      "type": "integer"
+    },
+    "max_persons": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "title": "Max Persons",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "boxes",
+    "frame_size",
+    "count",
+    "max_persons"
+  ],
+  "title": "OvercrowdingDetails",
+  "type": "object"
+}

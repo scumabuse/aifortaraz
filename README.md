@@ -1,26 +1,137 @@
-# safety-ai
+# Цифровой инспектор ОТ
 
-The AI module of the **Digital Safety Inspector** platform: a Python service that watches
-industrial camera streams and detects occupational-safety events in real time — PPE violations
-with zone-specific requirements, entry into forbidden zones, overcrowding, dangerous
-person–vehicle proximity, falls and persons lying motionless. It reports to the website backend
-through the fixed integration contract in [docs/CONTRACT.md](docs/CONTRACT.md).
+## О проекте
 
-The full documentation (installation, running, demo, training, architecture) is written in
-milestone M6; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
+«Цифровой инспектор ОТ» — система видеомониторинга охраны труда: камеры → ИИ-модуль (YOLO) → сайт-диспетчерская. ИИ-модуль `safety-ai` анализирует видео, сайт показывает живую картинку с разметкой, хранит инциденты со снимками и уведомляет ответственных. Система фиксирует нарушения СИЗ, вход в опасную зону, опасное сближение с техникой, падение человека, неподвижного человека и превышение допустимого числа людей в зоне.
 
-## Running with the other half
+## Проблема и эффект
 
-This module is one half of the platform; the website (`aifortaraz/safety-inspector`) is the
-other. The integration root's [README](../README.md) explains how to run both together (setup,
-the shared `.env`, `make dev`) and holds the single contract,
-[contract/CONTRACT.md](../contract/CONTRACT.md), of which [docs/CONTRACT.md](docs/CONTRACT.md) is
-a byte-identical copy. The module reaches the website through `SAFETY_AI_BACKEND_URL` and
-authenticates with `SAFETY_AI_API_KEY` (the website's AI key); a wrong or revoked key is reported
-as `backend rejected the API key (HTTP 401) for ...` and retried every 10 s, events stay spooled.
+- Травмы на производстве часто связаны с простыми нарушениями: сняли каску, зашли в зону работы техники.
+- Один инженер по охране труда отвечает за сотни людей и видит участок только во время обходов — обычно раз в смену.
+- Система смотрит на камеры круглосуточно: нарушение попадает в диспетчерскую через секунды, а не через часы.
+- Каждое срабатывание сохраняется со снимком, поэтому разбор и отчётность опираются на факты.
 
-| Port | Service |
+## Наши фишки
+
+- Правила СИЗ задаются по зонам, которые рисуются мышью в редакторе зон на сайте. Для каждой зоны выбираются требуемые СИЗ и запрет входа.
+- Нарушение подтверждается только после N кадров подряд (по умолчанию 8, демо-пресет ставит 6). Затем действует кулдаун (по умолчанию 60 с, в демо 20 с). Это снижает число ложных срабатываний.
+- Вывод «нет каски» опирается на прямые доказательства: модель видит не только СИЗ, но и открытые части тела (`no_helmet`, `no_gloves`, `no_boots`, `no_goggle`).
+- Работает с обычными камерами (видеофайл, RTSP, веб-камера) на ноутбуке, без облачных сервисов: модели и данные хранятся локально.
+- Скорость: nano-модель на CPU этой машины даёт 22–29 кадр/с при 640 px (`safety-ai/models/bench.json`, модель SH17). Новая модель того же размера отдельно не замерялась.
+- Нет распознавания лиц: люди различаются только номером трека.
+- Устойчивость к сбоям:
+  - события ИИ копятся в локальной очереди (SQLite) и доходят после перезапуска сайта (проверено тестом `test_chaos_backend_restart`);
+  - если ИИ перестаёт присылать heartbeat, через 60 с сайт возвращает для камеры демо-данные (в демо-режиме, тест `test_mock_switching`).
+- Telegram-уведомления со снимком реализованы на сайте. В этой сборке без токена бота они не проверялись.
+- На сайте есть страница «План цеха», аналитика с тепловой картой, а также акт и предписание по шаблону.
+- Запуск одной командой: `make dev` после разовой команды `make init`.
+- Контракт между сайтом и ИИ покрыт интеграционными тестами: прошли 21 тест (5 контрактных и 16 сценарных), на реальном сайте и реальном ИИ-модуле со сценариями. Собственные тесты сайта: 118 (backend) и 30 (frontend), все прошли.
+
+## Чем лучше аналогов
+
+- Это не просто «детектор касок», а цепочка «обнаружение → действие»: инцидент, уведомление, подтверждение, акт.
+- Зоны и правила настраивает инженер по ОТ в редакторе, без программиста. Новые правила ИИ получает автоматически.
+- Срабатывания объяснимы: к каждому прилагаются снимок, рамки объектов и список отсутствующих СИЗ.
+- Подключается к существующему видеонаблюдению: ИИ читает видеопоток, сайт показывает его в браузере.
+
+## Архитектура
+
+```
+камеры (файл / RTSP / веб-камера)
+   │
+   ▼
+safety-ai (YOLO, трекинг, правила) ──REST /api/v1/ingest/* + WebSocket /ws/ingest──▶ backend (FastAPI, WebSocket, SQLite)
+   │                                                                                      │
+   │  MJPEG напрямую в браузер: http://localhost:8001/stream/<камера>.mjpeg               ├──▶ Telegram
+   ▼                                                                                      ▼
+браузер ◀─────────────────────────── frontend (React) ◀──── /api, /ws/live ──────────────┘
+```
+
+| Сервис | Порт |
 |---|---|
-| 8001 | annotated MJPEG streams: `http://<ai-host>:8001/stream/<camera_id>.mjpeg` |
-| 9100 | health and metrics: `GET /health`, `GET /metrics` |
-| 8010 | strict mock backend for running without the website: `python -m tools.mock_backend --port 8010` (the website backend itself listens on 8000) |
+| Сайт (frontend, `make dev`) | 5173 (в Docker — 8080) |
+| Backend API | 127.0.0.1:8000 |
+| Видео ИИ (MJPEG) | 8001 |
+| Health и метрики ИИ | 9100 |
+| Учебный mock-backend ИИ | 8010 |
+
+## ИИ-модель
+
+- Архитектура: Ultralytics YOLO26n (базовые веса `yolo26n.pt`). Для позы используется `yolo26n-pose`, для транспорта — COCO-модель YOLO26n.
+- Датасет: [Ultralytics Construction-PPE](https://docs.ultralytics.com/datasets/detect/construction-ppe), выпуск ноября 2026 г.: 1 000 изображений (800 train / 200 val), 14 863 рамки, 12 классов, лицензия CC BY 4.0. В исходном задании была указана прежняя версия (1 416 изображений, 11 классов); по ссылке сейчас опубликован новый выпуск, обучались на нём.
+- Классы и как их понимает система:
+
+  | Класс | Значение |
+  |---|---|
+  | helmet, gloves, vest, boots | надетые СИЗ |
+  | goggles | очки (СИЗ glasses) |
+  | Person | человек |
+  | no_helmet | открытая голова, каски нет |
+  | no_goggle | открытое лицо, очков нет |
+  | no_gloves | открытые руки, перчаток нет |
+  | no_boots | открытые ноги, ботинок нет |
+  | forklift | погрузчик |
+  | no_vest | игнорируется: в контракте нет такого класса, отсутствие жилета определяется по человеку без жилета |
+
+- Метрики на val (200 изображений) из `safety-ai/runs/ppe_cppe_n_20261104_r1/results.csv`, лучшая эпоха 19: mAP50 = 0,735, mAP50-95 = 0,489, precision 0,806, recall 0,687.
+- Модель в реестре: `safety-ai/models/ppe_cppe_n.pt`, алиас `ppe_cppe_latest`. Её использует демо-конфигурация `safety-ai/configs/demo_integration.yaml`.
+- Обучение было коротким. Это базовый прогон на видеокарте GTX 1660 SUPER, остановленный вручную после 24 эпох (около 12 минут) из-за дедлайна. Основной прогон (YOLO26s, 2,5 ч) не выполнялся.
+- Ожидаем, что полный прогон и дообучение на видео из помещения, где проходит защита, повысят точность. Это пока не измерялось.
+- Запасная модель: `ppe_n_latest` (SH17). Переключение — одной строкой `models.ppe` в конфигурации.
+
+## Запуск
+
+Требования: Python 3.10+ (проверено на 3.12.10), Node.js 22+ (проверено на 26.13), GNU make. Опционально: Docker (для `make up`) и видеокарта NVIDIA.
+
+Проверено на этой машине:
+
+```
+make init      # один раз: создаёт .env (ключ ИИ, адреса) и копирует его в оба репозитория
+make doctor    # проверка окружения, портов, ключа, моделей и демо-видео
+make dev       # backend + frontend + ИИ; Ctrl+C останавливает всё
+```
+
+Docker-вариант: `make up`. На этой машине Docker не установлен, поэтому этот вариант не проверялся.
+
+Сайт: http://localhost:5173
+
+| Логин / пароль | Роль |
+|---|---|
+| admin / admin | всё, включая пользователей и ключи API |
+| engineer / engineer | камеры, зоны, инциденты, отчёты, настройки |
+| master / master | инциденты участка «Прессовый участок» |
+| viewer / viewer | только просмотр |
+
+Что увидеть: «Live-мониторинг» → камера cam-1 («Пресс №2»). На видео рамки людей с номерами треков, полигоны зон и отметки СИЗ (✓ / ✗ / ?). Также видны бейдж «AI» и таблица «Объекты в кадре».
+
+- **Веб-камера вместо видео для cam-1:** добавить в `.env` строку `SAFETY_AI_CAMERAS__0__SOURCE=0` и выполнить `make restart-ai`. Чтобы вернуть демо-видео, удалить эту строку.
+- **Telegram:** заполнить в `.env` переменные `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_IDS`, затем перезапустить `make dev`.
+- **ИИ без сайта** (из папки `safety-ai`):
+
+```
+.venv\Scripts\safety-ai.exe demo --source 0 --zones tools/demo_zones_cam1.yaml --show
+```
+
+## Структура репозитория
+
+- `aifortaraz/` — сайт: `safety-inspector/backend` (FastAPI, SQLite) и `safety-inspector/frontend` (React, Vite).
+- `safety-ai/` — ИИ-модуль: захват видео, YOLO, трекинг, правила, очередь событий, обучение модели.
+- `integration-tests/` — интеграционные тесты сайта и ИИ (pytest): контракт и сценарии.
+- `contract/` — контракт обмена сайт ↔ ИИ (`CONTRACT.md`, примеры, JSON-схемы).
+- `docs/` — интеграция, устранение неполадок, сценарий демонстрации.
+- `scripts/` — запуск, проверка окружения, демо-пресет.
+
+## Что не успели / дальше
+
+- Полный прогон обучения R2 (YOLO26s, 2,5 ч), подбор порогов по классам, анализ ошибок модели.
+- Экспорт новой модели в ONNX/OpenVINO с проверкой совпадения и замер FPS на CPU; TensorRT.
+- Дообучение на видео с места установки (рецепт описан в `safety-ai/docs/TRAINING_SPEC.md`, раздел 8.5).
+- Расширение датасета за счёт SH17.
+- Замер производительности всей системы, полные проходы проверки, запуск в Docker.
+
+## Команда и лицензии
+
+- Команда «essence»: Шамурат Атымтайжомарт, Рамазанов Дидар, Ардаққызы Нұрқамал.
+- Ultralytics (библиотека и веса YOLO26) — AGPL-3.0.
+- Датасет Construction-PPE (выпуск ноября 2026) — CC BY 4.0 (Ultralytics team).
+- Запасная модель SH17 — CC BY-NC-SA 4.0 (только некоммерческое использование).

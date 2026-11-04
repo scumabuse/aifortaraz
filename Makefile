@@ -1,109 +1,94 @@
-# safety-ai developer targets (spec 7.1, 8.7).
+# Digital Safety Inspector — website + AI module as one product (integration spec 7.6).
 #
-# GNU make on Linux, macOS and Windows (ezwinports make). On Windows make runs recipes with sh.exe
-# when it is on PATH (Git Bash) and with cmd.exe otherwise, so every recipe only invokes
-# "$(PY) -m <module>" or "$(PY) <script>": no shell builtins, no && chains, no rm -rf.
+# GNU make on Windows (ezwinports make), Linux and macOS. Recipes only call "$(PY) <script>",
+# "npm" and "docker compose", so they behave the same under sh and cmd.
 #
-#   make install                      editable install with the dev, onnx, openvino, data extras
-#   make check                        lint, typecheck, test, e2e, placeholders (in that order)
-#   make eval MODEL=ppe_n_latest      pass a registry name; ARGS="..." adds CLI options
+#   make setup       create the three virtual environments / node_modules (first run)
+#   make init        create .env (AI key, JWT secret) and copy it into both repositories
+#   make doctor      green/red pre-flight table
+#   make dev         backend + frontend + AI on this machine; Ctrl+C stops all three
+#   make up          the same with docker compose (CPU image of the AI module)
+#   make e2e         root integration suite (contract, schema parity, flows, chaos)
+#   make e2e-full    e2e + real-model smoke with screenshots + performance budget
 
 ifeq ($(OS),Windows_NT)
 PY ?= .venv/Scripts/python.exe
-BOOTSTRAP_PY ?= python
+WEB_PY := aifortaraz/safety-inspector/.venv/Scripts/python.exe
+AI_PY := safety-ai/.venv/Scripts/python.exe
+BOOT_PY ?= python
 else
 PY ?= .venv/bin/python
-BOOTSTRAP_PY ?= python3
+WEB_PY := aifortaraz/safety-inspector/.venv/bin/python
+AI_PY := safety-ai/.venv/bin/python
+BOOT_PY ?= python3
 endif
 
-COVERAGE_JSON := reports/coverage.json
-COVERAGE_MIN := 90
-MODEL ?= ppe_s_latest
-ARGS ?=
-# The default interpreter path becomes a prerequisite, so a missing .venv is created first.
-VENV_PY := $(filter .venv/%,$(PY))
-empty :=
-indent := $(empty)  $(empty)
+COMPOSE := docker compose -p inspector
+PYTEST_ARGS ?=
 
 .DEFAULT_GOAL := help
-.NOTPARALLEL:
-.PHONY: help venv install lint format typecheck test e2e check placeholders \
-	demo mock train eval bench models selftest lock
+.PHONY: help setup init doctor dev restart-ai up down logs ps e2e e2e-full demo-preset videos \
+	check-repos verify
 
 help:
-	$(info safety-ai make targets:)
-	$(info $(indent)venv          create .venv with $(BOOTSTRAP_PY) when it does not exist)
-	$(info $(indent)install       pip install -e ".[dev,onnx,openvino,data]" (creates .venv first))
-	$(info $(indent)lint          ruff check and ruff format --check)
-	$(info $(indent)format        sort imports and reformat with ruff)
-	$(info $(indent)typecheck     mypy safety_ai tools)
-	$(info $(indent)test          unit, property, scenario and integration tests with coverage, then)
-	$(info $(indent)              >= $(COVERAGE_MIN) % line coverage of safety_ai/logic and safety_ai/backend)
-	$(info $(indent)e2e           end-to-end tests with the real models (tests/e2e, marker e2e))
-	$(info $(indent)check         lint, typecheck, test, e2e and placeholders, in that order)
-	$(info $(indent)placeholders  fail on placeholders in safety_ai, tools and tests)
-	$(info $(indent)demo          offline demo on data/samples/synthetic_people.mp4 with MJPEG)
-	$(info $(indent)mock          strict mock backend on port 8010 (the website backend uses 8000))
-	$(info $(indent)train, eval, bench, selftest  safety-ai CLI commands (MODEL=$(MODEL), ARGS=...))
-	$(info $(indent)models        download or export the weights listed in models/registry.json)
-	$(info $(indent)lock          regenerate requirements.lock for the CPU Docker image (uv))
-	@echo Interpreter: $(PY)
+	$(info Digital Safety Inspector — integration root targets:)
+	$(info   setup        create .venv (root), aifortaraz/safety-inspector/.venv + node_modules, safety-ai/.venv)
+	$(info   init         create/complete .env and copy it into both repositories)
+	$(info   doctor       pre-flight checks (ports, .env, AI key, weights, videos, versions))
+	$(info   dev          run backend :8000, frontend :5173, AI :8001/:9100 (Ctrl+C stops all))
+	$(info   restart-ai   restart only the AI module of a running `make dev`)
+	$(info   up / down / logs / ps   docker compose equivalents (needs Docker))
+	$(info   e2e          root integration suite 8.1-8.2 (<= 15 min))
+	$(info   e2e-full     e2e + real-model smoke, screenshots and performance budget)
+	$(info   demo-preset  presentation preset against the running website (idempotent))
+	$(info   videos       build the demo videos safety-ai/data/samples/cam1.mp4, cam2.mp4)
+	$(info   check-repos  `make check` in both repositories)
+	$(info   verify       scripted manual-equivalent pass (Playwright))
+	@$(BOOT_PY) -c "pass"
 
-.venv/Scripts/python.exe .venv/bin/python:
-	$(BOOTSTRAP_PY) -m venv --upgrade-deps .venv
+setup:
+	$(BOOT_PY) scripts/setup_envs.py
 
-venv: $(VENV_PY)
+init:
+	$(BOOT_PY) scripts/init_env.py
 
-install: $(VENV_PY)
-	$(PY) -m pip install -e ".[dev,onnx,openvino,data]"
+doctor:
+	$(PY) scripts/doctor.py
 
-lint:
-	$(PY) -m ruff check .
-	$(PY) -m ruff format --check .
+dev:
+	$(PY) scripts/run_all.py
 
-format:
-	$(PY) -m ruff check --select I --fix .
-	$(PY) -m ruff format .
+restart-ai:
+	$(PY) scripts/run_all.py --restart-ai
 
-typecheck:
-	$(PY) -m mypy safety_ai tools
+up:
+	$(COMPOSE) up -d --build
+	$(COMPOSE) ps
 
-test:
-	$(PY) -m pytest tests/unit tests/property tests/scenarios tests/integration --cov=safety_ai --cov-report=json:$(COVERAGE_JSON) --cov-report=term
-	$(PY) tools/check_coverage.py --report $(COVERAGE_JSON) --package safety_ai/logic --package safety_ai/backend --min $(COVERAGE_MIN)
+down:
+	$(COMPOSE) down
+
+logs:
+	$(COMPOSE) logs -f --tail 200
+
+ps:
+	$(COMPOSE) ps
 
 e2e:
-	$(PY) -m pytest tests/e2e -m "e2e"
+	$(PY) -m pytest integration-tests -m "not slow" $(PYTEST_ARGS)
 
-check: lint typecheck test e2e placeholders
+e2e-full:
+	$(PY) -m pytest integration-tests $(PYTEST_ARGS)
 
-placeholders:
-	$(PY) tools/check_placeholders.py
+demo-preset:
+	$(PY) scripts/demo_preset.py
 
-demo:
-	$(PY) -m safety_ai.cli demo --source data/samples/synthetic_people.mp4 --zones tools/demo_zones.yaml --mjpeg --loop
+videos:
+	$(AI_PY) safety-ai/tools/make_demo_videos.py
 
-mock:
-	$(PY) -m safety_ai.cli mock-backend --port 8010 --config tools/mock_config.yaml
+check-repos:
+	$(MAKE) -C safety-ai check
+	$(MAKE) -C aifortaraz/safety-inspector check
 
-train:
-	$(PY) -m safety_ai.cli train $(ARGS)
-
-eval:
-	$(PY) -m safety_ai.cli eval --model $(MODEL) $(ARGS)
-
-bench:
-	$(PY) -m safety_ai.cli bench $(ARGS)
-
-selftest:
-	$(PY) -m safety_ai.cli selftest $(ARGS)
-
-models:
-	$(PY) -m safety_ai.inference.models_setup
-
-# requirements.lock pins the CPU Docker image (linux x86_64, Python 3.11). torch and torchvision
-# resolve to the +cpu wheels of the PyTorch index, so installing the lock needs
-# --extra-index-url https://download.pytorch.org/whl/cpu. tools/lock_overrides.txt removes
-# opencv-python (the GUI build ultralytics depends on); only opencv-python-headless is pinned.
-lock:
-	$(PY) -m uv pip compile pyproject.toml --extra onnx --extra openvino --extra data --python-version 3.11 --python-platform x86_64-manylinux_2_28 --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match --override tools/lock_overrides.txt -o requirements.lock
+verify:
+	$(PY) scripts/verify_run.py

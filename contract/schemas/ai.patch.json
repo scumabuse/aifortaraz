@@ -1,0 +1,15 @@
+{
+  "additionalProperties": false,
+  "description": "Body of ``PATCH /api/v1/ingest/events/{external_id}``.",
+  "properties": {
+    "ended_at": {
+      "title": "Ended At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "ended_at"
+  ],
+  "title": "EventEndPatch",
+  "type": "object"
+}

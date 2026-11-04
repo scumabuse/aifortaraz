@@ -1,0 +1,78 @@
+# Root integration scenario (two_violations); zones come from the website config in the tests.
+name: two_violations
+frame_size:
+- 1280
+- 720
+fps: 10
+start_utc: '2026-11-03T09:00:00Z'
+camera_id: cam-1
+timezone: Asia/Yekaterinburg
+description: Two separate PPE violations (track 51 at 2–10 s, track 52 at 25–33 s).
+duration_s: 60
+config:
+  thresholds:
+    confirm_frames: 6
+    cooldown_sec: 20
+    min_confidence: 0.5
+  ppe_types:
+  - helmet
+  - vest
+  - glasses
+  - gloves
+  - mask
+  - boots
+  - earmuffs
+  - harness
+  - face_shield
+  zones:
+  - id: zone-a
+    name: Zone A
+    type: ppe
+    polygon:
+    - - 0.2
+      - 0.15
+    - - 0.8
+      - 0.15
+    - - 0.8
+      - 0.98
+    - - 0.2
+      - 0.98
+    rules:
+      required_ppe:
+      - helmet
+      - vest
+tracks:
+- id: 51
+  label: person
+  conf: 0.92
+  keyframes:
+  - t: 2
+    feet:
+    - 0.4
+    - 0.93
+    height: 0.55
+    ppe:
+      helmet: missing
+      vest: present
+  - t: 10
+    ppe:
+      helmet: present
+  - t: 14
+    visible: false
+- id: 52
+  label: person
+  conf: 0.92
+  keyframes:
+  - t: 25
+    feet:
+    - 0.62
+    - 0.93
+    height: 0.55
+    ppe:
+      helmet: present
+      vest: missing
+  - t: 33
+    ppe:
+      vest: present
+  - t: 37
+    visible: false

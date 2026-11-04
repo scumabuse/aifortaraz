@@ -1,0 +1,17 @@
+{
+  "camera_id": "cam-1",
+  "period_start": "2026-11-03T14:21:00Z",
+  "period_end": "2026-11-03T14:22:00Z",
+  "persons_total": 42,
+  "persons_compliant": 39,
+  "by_ppe": {
+    "helmet": {
+      "checked": 42,
+      "compliant": 40
+    },
+    "vest": {
+      "checked": 42,
+      "compliant": 41
+    }
+  }
+}

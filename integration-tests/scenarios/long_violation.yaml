@@ -1,0 +1,59 @@
+# Root integration scenario (long_violation); zones come from the website config in the tests.
+name: long_violation
+frame_size:
+- 1280
+- 720
+fps: 10
+start_utc: '2026-11-03T09:00:00Z'
+camera_id: cam-1
+timezone: Asia/Yekaterinburg
+description: One long PPE violation (track 61 from 2 s to 85 s).
+duration_s: 90
+config:
+  thresholds:
+    confirm_frames: 6
+    cooldown_sec: 20
+    min_confidence: 0.5
+  ppe_types:
+  - helmet
+  - vest
+  - glasses
+  - gloves
+  - mask
+  - boots
+  - earmuffs
+  - harness
+  - face_shield
+  zones:
+  - id: zone-a
+    name: Zone A
+    type: ppe
+    polygon:
+    - - 0.2
+      - 0.15
+    - - 0.8
+      - 0.15
+    - - 0.8
+      - 0.98
+    - - 0.2
+      - 0.98
+    rules:
+      required_ppe:
+      - helmet
+      - vest
+tracks:
+- id: 61
+  label: person
+  conf: 0.92
+  keyframes:
+  - t: 2
+    feet:
+    - 0.5
+    - 0.93
+    height: 0.55
+    ppe:
+      helmet: missing
+      vest: present
+  - t: 85
+    ppe:
+      helmet: present

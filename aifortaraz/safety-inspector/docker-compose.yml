@@ -1,0 +1,27 @@
+services:
+  backend:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-sqlite:///./data/inspector.db}
+      SEED_AI_API_KEY: ${SEED_AI_API_KEY:-}
+      DEMO_MODE: ${DEMO_MODE:-true}
+      AI_MJPEG_BASE_URL: ${AI_MJPEG_BASE_URL:-http://localhost:8001}
+      AI_CAMERAS: ${AI_CAMERAS:-}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy

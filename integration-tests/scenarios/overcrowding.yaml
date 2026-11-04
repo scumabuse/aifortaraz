@@ -1,0 +1,87 @@
+# Root integration scenario (overcrowding); zones come from the website config in the tests.
+name: overcrowding
+frame_size:
+- 1280
+- 720
+fps: 10
+start_utc: '2026-11-03T09:00:00Z'
+camera_id: cam-1
+timezone: Asia/Yekaterinburg
+description: Three workers stand in a zone that allows two (2–16 s).
+duration_s: 25
+config:
+  thresholds:
+    confirm_frames: 6
+    cooldown_sec: 20
+    min_confidence: 0.5
+  ppe_types:
+  - helmet
+  - vest
+  - glasses
+  - gloves
+  - mask
+  - boots
+  - earmuffs
+  - harness
+  - face_shield
+  zones:
+  - id: zone-a
+    name: Zone A
+    type: ppe
+    polygon:
+    - - 0.2
+      - 0.15
+    - - 0.8
+      - 0.15
+    - - 0.8
+      - 0.98
+    - - 0.2
+      - 0.98
+    rules:
+      max_persons: 2
+tracks:
+- id: 11
+  label: person
+  conf: 0.92
+  keyframes:
+  - t: 1
+    feet:
+    - 0.32
+    - 0.93
+    height: 0.5
+    pose: standing
+    ppe:
+      helmet: present
+      vest: present
+  - t: 16
+    visible: false
+- id: 12
+  label: person
+  conf: 0.92
+  keyframes:
+  - t: 1
+    feet:
+    - 0.5
+    - 0.93
+    height: 0.5
+    pose: standing
+    ppe:
+      helmet: present
+      vest: present
+  - t: 16
+    visible: false
+- id: 13
+  label: person
+  conf: 0.92
+  keyframes:
+  - t: 1
+    feet:
+    - 0.68
+    - 0.93
+    height: 0.5
+    pose: standing
+    ppe:
+      helmet: present
+      vest: present
+  - t: 16
+    visible: false

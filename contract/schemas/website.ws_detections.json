@@ -1,0 +1,174 @@
+{
+  "$defs": {
+    "DetectionObject": {
+      "additionalProperties": false,
+      "properties": {
+        "track_id": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": -9223372036854775808,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Track Id"
+        },
+        "label": {
+          "enum": [
+            "person",
+            "vehicle",
+            "forklift",
+            "truck",
+            "car",
+            "helmet",
+            "vest",
+            "glasses",
+            "gloves",
+            "mask",
+            "boots",
+            "earmuffs",
+            "harness",
+            "face_shield",
+            "head",
+            "face",
+            "hands",
+            "foot",
+            "ear"
+          ],
+          "title": "Label",
+          "type": "string"
+        },
+        "bbox": {
+          "maxItems": 4,
+          "minItems": 4,
+          "prefixItems": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            }
+          ],
+          "title": "Bbox",
+          "type": "array"
+        },
+        "conf": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Conf",
+          "type": "number"
+        },
+        "ppe": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "propertyNames": {
+            "enum": [
+              "helmet",
+              "vest",
+              "glasses",
+              "gloves",
+              "mask",
+              "boots",
+              "earmuffs",
+              "harness",
+              "face_shield"
+            ]
+          },
+          "title": "Ppe",
+          "type": "object"
+        },
+        "zones": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Zones",
+          "type": "array"
+        },
+        "state": {
+          "default": "ok",
+          "enum": [
+            "ok",
+            "violation",
+            "danger"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "bbox",
+        "conf"
+      ],
+      "title": "DetectionObject",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "const": "detections",
+      "title": "Type",
+      "type": "string"
+    },
+    "camera_id": {
+      "title": "Camera Id",
+      "type": "string"
+    },
+    "ts": {
+      "format": "date-time",
+      "title": "Ts",
+      "type": "string"
+    },
+    "frame_id": {
+      "maximum": 9223372036854775807,
+      "minimum": -9223372036854775808,
+      "title": "Frame Id",
+      "type": "integer"
+    },
+    "objects": {
+      "items": {
+        "$ref": "#/$defs/DetectionObject"
+      },
+      "maxItems": 200,
+      "title": "Objects",
+      "type": "array"
+    }
+  },
+  "required": [
+    "type",
+    "camera_id",
+    "ts",
+    "frame_id",
+    "objects"
+  ],
+  "title": "DetectionsIn",
+  "type": "object"
+}

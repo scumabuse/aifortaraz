@@ -1,0 +1,68 @@
+{
+  "camera": {
+    "id": "cam-1",
+    "name": "Press #2",
+    "stream_url": "rtsp://192.168.1.10/live",
+    "stream_type": "rtsp"
+  },
+  "frame_size_hint": [
+    1280,
+    720
+  ],
+  "thresholds": {
+    "confirm_frames": 8,
+    "cooldown_sec": 60,
+    "min_confidence": 0.5
+  },
+  "ppe_types": [
+    "helmet",
+    "vest",
+    "glasses",
+    "gloves",
+    "mask",
+    "boots",
+    "earmuffs",
+    "harness",
+    "face_shield"
+  ],
+  "zones": [
+    {
+      "id": "zone-press-2",
+      "name": "Press #2",
+      "type": "danger",
+      "polygon": [
+        [
+          0.1,
+          0.2
+        ],
+        [
+          0.55,
+          0.18
+        ],
+        [
+          0.6,
+          0.8
+        ],
+        [
+          0.12,
+          0.85
+        ]
+      ],
+      "rules": {
+        "required_ppe": [
+          "helmet",
+          "glasses"
+        ],
+        "entry_forbidden": false,
+        "max_persons": 2,
+        "min_vehicle_distance_m": null,
+        "schedule": null,
+        "confirm_frames": 8,
+        "cooldown_sec": 60,
+        "severity_override": null
+      }
+    }
+  ],
+  "version": 42,
+  "updated_at": "2026-11-03T12:00:00Z"
+}

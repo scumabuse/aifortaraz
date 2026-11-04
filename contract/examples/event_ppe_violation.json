@@ -1,0 +1,36 @@
+{
+  "external_id": "cam-1-1762179667-17-ppe_violation",
+  "camera_id": "cam-1",
+  "zone_id": "zone-press-2",
+  "severity": null,
+  "confidence": 0.91,
+  "track_id": 17,
+  "started_at": "2026-11-03T14:21:07Z",
+  "ended_at": null,
+  "type": "ppe_violation",
+  "details": {
+    "missing_ppe": [
+      "helmet"
+    ],
+    "present_ppe": [
+      "vest"
+    ],
+    "boxes": [
+      {
+        "track_id": 17,
+        "label": "person",
+        "bbox": [
+          0.41,
+          0.22,
+          0.12,
+          0.46
+        ],
+        "conf": 0.93
+      }
+    ],
+    "frame_size": [
+      1280,
+      720
+    ]
+  }
+}

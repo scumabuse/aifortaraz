@@ -1,0 +1,45 @@
+# safety-ai together with the strict mock backend (spec 7.4).
+#   docker compose up --build
+# MJPEG: http://127.0.0.1:8001/stream/cam-1.mjpeg   health: http://127.0.0.1:9100/health
+# Mock backend debug view: http://127.0.0.1:8010/debug/events (8010: the website backend owns 8000)
+services:
+  mock-backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cpu
+    image: safety-ai:cpu
+    command: ["mock-backend", "--host", "0.0.0.0", "--port", "8010", "--config", "tools/mock_config.yaml"]
+    environment:
+      SAFETY_AI_API_KEY: ${SAFETY_AI_API_KEY:-test-key}
+    ports:
+      - "8010:8010"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=4).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+  safety-ai:
+    image: safety-ai:cpu
+    depends_on:
+      mock-backend:
+        condition: service_healthy
+    command: ["run", "--config", "configs/demo_file.yaml"]
+    environment:
+      SAFETY_AI_BACKEND_URL: http://mock-backend:8010
+      SAFETY_AI_API_KEY: ${SAFETY_AI_API_KEY:-test-key}
+      SAFETY_AI_OUTPUT__EXPOSE: "true"
+    ports:
+      - "8001:8001"
+      - "9100:9100"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./events:/app/events
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9100/health', timeout=4).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 120s
+      retries: 4

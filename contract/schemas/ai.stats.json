@@ -1,0 +1,85 @@
+{
+  "$defs": {
+    "PpeStat": {
+      "additionalProperties": false,
+      "description": "Per-item compliance counters of a stats window.",
+      "properties": {
+        "checked": {
+          "minimum": 0,
+          "title": "Checked",
+          "type": "integer"
+        },
+        "compliant": {
+          "minimum": 0,
+          "title": "Compliant",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "checked",
+        "compliant"
+      ],
+      "title": "PpeStat",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Body of ``POST /api/v1/ingest/stats`` (every 60 s per camera, minute-aligned windows).",
+  "properties": {
+    "camera_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+      "title": "Camera Id",
+      "type": "string"
+    },
+    "period_start": {
+      "title": "Period Start",
+      "type": "string"
+    },
+    "period_end": {
+      "title": "Period End",
+      "type": "string"
+    },
+    "persons_total": {
+      "minimum": 0,
+      "title": "Persons Total",
+      "type": "integer"
+    },
+    "persons_compliant": {
+      "minimum": 0,
+      "title": "Persons Compliant",
+      "type": "integer"
+    },
+    "by_ppe": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PpeStat"
+      },
+      "propertyNames": {
+        "enum": [
+          "helmet",
+          "vest",
+          "glasses",
+          "gloves",
+          "mask",
+          "boots",
+          "earmuffs",
+          "harness",
+          "face_shield"
+        ]
+      },
+      "title": "By Ppe",
+      "type": "object"
+    }
+  },
+  "required": [
+    "camera_id",
+    "period_start",
+    "period_end",
+    "persons_total",
+    "persons_compliant",
+    "by_ppe"
+  ],
+  "title": "StatsPayload",
+  "type": "object"
+}

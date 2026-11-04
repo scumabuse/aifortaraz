@@ -1,0 +1,52 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "camera_id": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Camera Id",
+      "type": "string"
+    },
+    "fps": {
+      "maximum": 1000,
+      "minimum": 0,
+      "title": "Fps",
+      "type": "number"
+    },
+    "model_name": {
+      "maxLength": 100,
+      "title": "Model Name",
+      "type": "string"
+    },
+    "model_version": {
+      "maxLength": 100,
+      "title": "Model Version",
+      "type": "string"
+    },
+    "status": {
+      "default": "ok",
+      "enum": [
+        "ok",
+        "online",
+        "offline",
+        "degraded",
+        "error"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "extra": {
+      "additionalProperties": true,
+      "title": "Extra",
+      "type": "object"
+    }
+  },
+  "required": [
+    "camera_id",
+    "fps",
+    "model_name",
+    "model_version"
+  ],
+  "title": "HeartbeatIn",
+  "type": "object"
+}

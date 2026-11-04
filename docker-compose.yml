@@ -1,45 +1,57 @@
-# safety-ai together with the strict mock backend (spec 7.4).
-#   docker compose up --build
-# MJPEG: http://127.0.0.1:8001/stream/cam-1.mjpeg   health: http://127.0.0.1:9100/health
-# Mock backend debug view: http://127.0.0.1:8010/debug/events (8010: the website backend owns 8000)
+# Digital Safety Inspector: website backend + website frontend + AI module (integration spec 7.6).
+#   make up      (docker compose -p inspector up -d --build)
+# Website http://localhost:8080 (admin/admin) · AI video http://localhost:8001/stream/cam-1.mjpeg ·
+# AI health http://localhost:9100/health. All three read the root .env (`make init` creates it).
+# Inside compose the AI talks to the backend at http://backend:8000; the browser loads MJPEG from
+# localhost:8001 through the port mapping (contract 4.7).
 services:
-  mock-backend:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.cpu
-    image: safety-ai:cpu
-    command: ["mock-backend", "--host", "0.0.0.0", "--port", "8010", "--config", "tools/mock_config.yaml"]
+  backend:
+    build: ./aifortaraz/safety-inspector/backend
+    env_file: .env
     environment:
-      SAFETY_AI_API_KEY: ${SAFETY_AI_API_KEY:-test-key}
+      DATABASE_URL: sqlite:///./data/inspector.db
+      DATA_DIR: ./data
+    volumes:
+      - ./aifortaraz/safety-inspector/data:/app/data
     ports:
-      - "8010:8010"
+      - "8000:8000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=4).status == 200 else 1)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=4)"]
       interval: 10s
       timeout: 5s
+      retries: 10
       start_period: 20s
-      retries: 5
 
-  safety-ai:
-    image: safety-ai:cpu
+  frontend:
+    build: ./aifortaraz/safety-inspector/frontend
+    ports:
+      - "8080:80"
     depends_on:
-      mock-backend:
+      backend:
         condition: service_healthy
-    command: ["run", "--config", "configs/demo_file.yaml"]
+
+  ai:
+    build:
+      context: ./safety-ai
+      dockerfile: docker/Dockerfile.cpu
+    env_file: .env
     environment:
-      SAFETY_AI_BACKEND_URL: http://mock-backend:8010
-      SAFETY_AI_API_KEY: ${SAFETY_AI_API_KEY:-test-key}
+      SAFETY_AI_BACKEND_URL: http://backend:8000
       SAFETY_AI_OUTPUT__EXPOSE: "true"
+    command: ["run", "--config", "configs/demo_integration.yaml"]
+    volumes:
+      - ./safety-ai/models:/app/models
+      - ./safety-ai/data:/app/data
+      - ./safety-ai/events:/app/events
     ports:
       - "8001:8001"
       - "9100:9100"
-    volumes:
-      - ./data:/app/data
-      - ./models:/app/models
-      - ./events:/app/events
+    depends_on:
+      backend:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9100/health', timeout=4).status == 200 else 1)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/health', timeout=4)"]
       interval: 15s
       timeout: 5s
+      retries: 6
       start_period: 120s
-      retries: 4

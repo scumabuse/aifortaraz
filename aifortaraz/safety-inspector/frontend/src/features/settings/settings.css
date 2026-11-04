@@ -1,0 +1,30 @@
+.settings-fields {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+.settings-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 8px 0;
+}
+.settings-recipient {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 10px;
+  align-items: end;
+}
+.settings-log {
+  border-top: 1px solid #536671;
+  margin-top: 24px;
+  padding-top: 14px;
+}
+.settings-log .action-row {
+  margin-top: 12px;
+}
+@media (max-width: 640px) {
+  .settings-recipient {
+    grid-template-columns: 1fr;
+  }
+}

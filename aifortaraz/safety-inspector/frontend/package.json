@@ -1,0 +1,47 @@
+{
+  "name": "digital-safety-inspector",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "format": "prettier --write src",
+    "format:check": "prettier --check src",
+    "test": "node --experimental-strip-types --test tests/geometry.test.mjs tests/efficiency.test.mjs tests/labels.test.mjs tests/live-status.test.mjs tests/incident-details.test.mjs tests/supported-ppe.test.mjs"
+  },
+  "dependencies": {
+    "@radix-ui/react-slot": "^1.2.3",
+    "@tanstack/react-query": "^5.105.3",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "hls.js": "^1.7.4",
+    "konva": "^10.9.1",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-konva": "^18.2.16",
+    "react-router-dom": "^7.18.5",
+    "recharts": "^2.15.4",
+    "tailwind-merge": "^2.6.0",
+    "zustand": "^5.0.16"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^9.39.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "globals": "^15.12.0",
+    "postcss": "^8.4.49",
+    "prettier": "^3.9.10",
+    "tailwindcss": "^3.4.16",
+    "typescript": "~5.6.3",
+    "typescript-eslint": "^8.46.0",
+    "vite": "^6.0.1"
+  }
+}

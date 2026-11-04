@@ -1,0 +1,120 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "external_id": {
+      "maxLength": 250,
+      "minLength": 1,
+      "title": "External Id",
+      "type": "string"
+    },
+    "camera_id": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Camera Id",
+      "type": "string"
+    },
+    "zone_id": {
+      "anyOf": [
+        {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Zone Id"
+    },
+    "type": {
+      "enum": [
+        "ppe_violation",
+        "zone_intrusion",
+        "vehicle_proximity",
+        "fall_detected",
+        "person_immobile",
+        "overcrowding",
+        "custom"
+      ],
+      "title": "Type",
+      "type": "string"
+    },
+    "severity": {
+      "anyOf": [
+        {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Severity"
+    },
+    "confidence": {
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "track_id": {
+      "maximum": 9223372036854775807,
+      "minimum": -9223372036854775808,
+      "title": "Track Id",
+      "type": "integer"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "ended_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ended At"
+    },
+    "details": {
+      "additionalProperties": true,
+      "title": "Details",
+      "type": "object"
+    },
+    "snapshot_base64": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Snapshot Base64"
+    }
+  },
+  "required": [
+    "external_id",
+    "camera_id",
+    "type",
+    "confidence",
+    "track_id",
+    "started_at",
+    "details"
+  ],
+  "title": "EventIn",
+  "type": "object"
+}

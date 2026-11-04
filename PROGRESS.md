@@ -1,63 +1,37 @@
-# Progress
+# Integration progress
 
-Updated after every milestone and at least every 30 minutes (spec 3). On restart: read this file,
-DECISIONS.md and CHECKLIST.md, then continue from the first unticked checklist item.
+Updated after every phase and at least every 30 minutes (integration spec 3). On restart read this
+file, DECISIONS.md, CHECKLIST.md and INTEGRATION_INVENTORY.md and continue from the first unfinished item.
 
-## Status — 2026-11-04 11:40 (local, UTC+5)
+## Status — 2026-11-04 23:20 (UTC+5) — Phase B done, 8.1–8.2 green, Phase C/D/E in progress
+
+### Done since 20:35
+- Phase B website: b2a1994 (frontend), 2fbd88e (backend), 680c63b (oversized snapshot → 422 with field errors).
+- Phase B AI: 1f0f9ae (logic core, fakes), 5a4eca1 (contract conformance: schemas, clients, spool, config sync, strict mock on 8010), 5a8e336 (`safety-ai run`: supervisor, workers, sinks, demo, selftest, CLI), bd23ac1 (README, D-038..D-043, lap dependency). AI-side evidence: 2850 unit/property tests and the e2e run green (`reports/inventory/ai_messages_after.md`).
+- 8.1 contract tests: 5 passed. 8.2 flow tests: 16/16 passed (`reports/runtime/flows_run1.log`: 13 passed, 3 failed on test defects; fixed in f54a30e — zones with incident history are disabled instead of deleted, and the detections test waits for `ok` after the violation; `reports/runtime/flows_run2.log`: the 3 passed).
+
+### In progress
+- Phase C wiring checks, 8.3 real-model smoke with screenshots, 8.4 performance budget, `scripts/verify_run.py` (CPU only: the GPU is busy with the Construction-PPE training chain of safety-ai, see safety-ai/docs/TRAINING_SPEC.md).
+- Phase E root documentation (README, docs/INTEGRATION.md, TROUBLESHOOTING.md, DEMO_SCRIPT.md) and the inventory's commit column.
+
+### Next
+- Verification Protocol (10.2) ×3 after the training work in safety-ai is committed (both tasks change safety-ai; the passes must see the final tree).
+
+## Status — 2026-11-04 20:35 (UTC+5) — Phase A done, Phase B (fixing) starting
 
 ### Done
-- Environment surveyed (DECISIONS.md D-004): Windows 11, Python 3.12.10, GTX 1660 SUPER 6 GB (CUDA OK), no Docker/WSL, GNU make available.
-- `.venv` created; installed torch 2.14.1+cu126, torchvision 0.29.1, ultralytics 8.4.201, OpenCV 5.0.0, onnxruntime 1.31.1, OpenVINO 2026.4.1 and the rest of the stack.
-- YOLO26 weights load; yolo26n 640: 46.7 ms CPU / 21.5 ms GPU on bus.jpg (D-008).
-- Dataset reachability probed (D-005, D-006, D-007): SH17 labels via range requests + Pexels images; Construction Site Safety (Kaggle, 228 MB, CC BY 4.0); Hard Hat Detection (Kaggle, 1.3 GB, CC0); CHV (Google Drive); UR Fall / Le2i Kaggle mirrors; no harness dataset found; Roboflow needs a key.
-- Specification saved verbatim to docs/SPEC.md; DECISIONS.md D-001…D-026; CHECKLIST.md with every 10.2 item unticked.
-- Core shared types written: `safety_ai/clock.py`, `inference/types.py`, `capture/types.py`, `backend/schemas.py` (round-trips every contract example), `logic/types.py`, `config/models.py`.
+- Root repository created (contract/CONTRACT.md = spec section 4 verbatim).
+- Environment facts collected (Windows 11, Python 3.12.10, Node 26.13 / npm 11.20, make 4.4.1, GTX 1660 SUPER, no Docker, no webcam, ports 8000/5173/8080/8001/9100/8010 free, no demo videos on either side).
+- Duplicate resolved: the stale AI-module copy at the top of aifortaraz/ archived to `_archive/aifortaraz_ai_copy_2026-11-04/` (aifortaraz `83a018c`, I-001).
 
-### Wave A result (03:55–04:40, committed 03a9d75)
-- 10 parallel engineers; the account's 5-hour usage limit stopped 9 of them before they returned, but their files were on disk: ~56k lines, 2248 unit/property tests passing, 7 failing (fall ×3, mock rate limiter ×1, Makefile tests ×3).
-- Real downloads done: SH17 8099/8099 images (Pexels 1280 px + 1 archive fallback), CSS 2801, harness (Kaggle manoj223/safety-harness, 566, MIT), CHV 1330, UR Fall 70 videos; Hard Hat partial (9067 files); no forklift, no Le2i yet.
-- Lead fixes after the restart (11:20): lint/mypy of the shared modules (schemas default_factory typing, PEP 604 unions, long docstrings).
+- INTEGRATION_INVENTORY.md: website and AI maps with file:line, baselines (website green: 58 + 8 tests, lint, build; AI: 2596 tests green, mypy green, ruff red), real website responses (`reports/inventory/website_responses.md`, captured by `scripts/inventory_probe.py`), conformance matrix of 111 rows (56 OK, 55 to fix: website 27, AI 26, both 2).
 
-### In progress — Wave B (11:35, workflow `safety-ai-wave-b`, run wf_893e4e43-b50)
-Dependency-chained, ≤ 5 agents at once to stay inside the usage limit:
-- B-data: finish the data pipeline, build data/merged + data.yaml + train_oversampled.txt + reports/data_stats.md, then write `data/merged/READY`.
-- B-engine: tracks, rule state machines, stats aggregator, id allocator, LogicEngine (ARCHITECTURE 3.8/4).
-- B-fix: the 7 failing tests, repo-wide ruff/format, Makefile/lock checks.
-- B-models: models_setup (weights + registry), `--check`, e2e inference/training tests, ONNX/OpenVINO exports + verification, CPU bench.
-- B-fakes: scenario YAML model, FakeSource/FakeDetector/FakePose.
-- then B-worker (worker, sinks, IPC, demo, CLI) → B-app (supervisor, run service); B-fallclf (UR Fall classifier).
-- GPU training driver (background): waits for `data/merged/READY`, then trains yolo26n (70 min) and yolo26s (110 min) through `safety_ai.training.train.train` (log in the session scratchpad, results in runs/gpu_training_driver.json).
+### In progress
+- Phase B: website fixes (validation, schedule days, null ppe, KPI, seeds/key/env, WS robustness, supported_ppe, labels, badges/filter) and AI fixes (integration layer: CLI, worker, sinks, supervisor, selftest; heartbeat extra + supported_ppe; config null tolerance; 401 handling; severity null; mock port 8010; demo_integration.yaml; demo videos).
 
-### Next (exact commands)
-- After Wave B: `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests/unit tests/property` and `make lint typecheck`.
-- Wave C: 14 scenarios + runner, integration tests (8.4), e2e + synthetic video + verify_run + demo configs + selftest, docs + tools/check_docker.py.
+### Next commands
+- Website: `cd aifortaraz/safety-inspector/backend && ../.venv/Scripts/python -m pytest -q`; `npm --prefix aifortaraz/safety-inspector/frontend test && npm --prefix aifortaraz/safety-inspector/frontend run lint && npm --prefix aifortaraz/safety-inspector/frontend run build`.
+- AI: `cd safety-ai && make check`.
 
 ### Open problems
-- Docker cannot be built on this machine (D-004 fallback).
-- Forklift and Le2i not downloaded yet (B-data retries for ≤ 15 min, otherwise skipped and documented); vehicles then come from the COCO vehicle_n model (spec 5.3 fallback).
-- The account usage limit can stop agents mid-task again; their files survive and the next wave resumes from them.
-
-## PPE training on Construction-PPE (docs/TRAINING_SPEC.md)
-
-<!-- cppe-progress:start -->
-Updated 2026-11-04 18:10 (UTC) by the Construction-PPE pipeline.
-
-**Stage:** S0 done, S1 in progress (T1 agent; S4-S7 follow later).
-
-- Done: environment detected (`python -m safety_ai.training.environment` -> `reports/environment.md`: GTX 1660 SUPER 6143 MiB, CUDA 12.6, torch 2.14.1+cu126, ultralytics 8.4.201, i5-10400F 6C/12T, 15.9 GiB RAM, mode GPU); archive downloaded and verified (647,666,037 bytes, CRCs ok, sha256 e5817aa9...1232, DECISIONS.md T-010) and extracted to `data/construction-ppe/`; registry aliases (T-008) with tests.
-- In progress: S1 data verification, statistics, test-split carve, unified copy.
-- Next command: `.venv/Scripts/python.exe -m safety_ai.training.cli_cppe data all`
-- Open problems: none.
-
-**Run chain** (`reports/cppe/chain.json`): state **running**, current run r1, pid 27548, log `reports/cppe/logs/chain.log`.
-
-| run | state | name | epoch | box / cls / dfl loss | mAP50 | mAP50-95 | best mAP50-95 | elapsed | ETA |
-|---|---|---|---|---|---|---|---|---|---|
-| r0 | finished | ppe_cppe_n_20261104_r0 | 1/1 | - | - | - | 0.0404 | 3.2 min | 0.0 min |
-| r1 | running | ppe_cppe_n_20261104_r1 | - | - | - | - | - | 1.4 min | - |
-
-Check the chain:
-
-- `.venv/Scripts/python.exe -m safety_ai.training.cli_cppe status`
-- `type reports\cppe\logs\chain.log (and r1.log, r2.log, r3.log)`
-<!-- cppe-progress:end -->
+- The AI module has no CLI/worker/supervisor yet (I-002), so "safety-ai run against the mock" cannot be executed in Phase A; recorded as MISSING on AI.

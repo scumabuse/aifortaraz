@@ -1,0 +1,24 @@
+{
+  "camera_id": "cam-1",
+  "fps": 11.8,
+  "model_name": "ppe_s_sh17",
+  "model_version": "2026-11-04",
+  "status": "ok",
+  "extra": {
+    "device": "cuda:0",
+    "backend": "tensorrt",
+    "queue_depth": 0,
+    "frames_dropped": 12,
+    "stream": "connected",
+    "supported_ppe": [
+      "helmet",
+      "vest",
+      "glasses",
+      "gloves",
+      "mask",
+      "boots",
+      "earmuffs",
+      "face_shield"
+    ]
+  }
+}

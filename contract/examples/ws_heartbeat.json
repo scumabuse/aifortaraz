@@ -1,0 +1,15 @@
+{
+  "type": "heartbeat",
+  "camera_id": "cam-1",
+  "fps": 11.8,
+  "model_name": "ppe_s_sh17",
+  "model_version": "2026-11-04",
+  "status": "ok",
+  "extra": {
+    "device": "cpu",
+    "backend": "openvino",
+    "queue_depth": 0,
+    "frames_dropped": 0,
+    "stream": "connected"
+  }
+}

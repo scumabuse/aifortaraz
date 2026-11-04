@@ -1,0 +1,135 @@
+{
+  "$defs": {
+    "HeartbeatExtra": {
+      "additionalProperties": true,
+      "description": "``extra`` object of a heartbeat.\n\nThe integration contract (4.2) makes ``extra`` free-form: the fields below are the ones this\nmodule always sends, additional keys are allowed. ``supported_ppe`` is the contract's additive\nextension — the PPE codes the loaded detector can see (derived from its class map). When it is\nunknown (None) the key is left out of the JSON: the contract asks both sides to tolerate the\nkey being absent, not ``null`` (DECISIONS.md D-035).",
+      "properties": {
+        "device": {
+          "minLength": 1,
+          "title": "Device",
+          "type": "string"
+        },
+        "backend": {
+          "minLength": 1,
+          "title": "Backend",
+          "type": "string"
+        },
+        "queue_depth": {
+          "minimum": 0,
+          "title": "Queue Depth",
+          "type": "integer"
+        },
+        "frames_dropped": {
+          "minimum": 0,
+          "title": "Frames Dropped",
+          "type": "integer"
+        },
+        "stream": {
+          "enum": [
+            "connecting",
+            "connected",
+            "reconnecting",
+            "ended",
+            "failed"
+          ],
+          "title": "Stream",
+          "type": "string"
+        },
+        "model_family": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Family"
+        },
+        "supported_ppe": {
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "helmet",
+                  "vest",
+                  "glasses",
+                  "gloves",
+                  "mask",
+                  "boots",
+                  "earmuffs",
+                  "harness",
+                  "face_shield"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Supported Ppe"
+        }
+      },
+      "required": [
+        "device",
+        "backend",
+        "queue_depth",
+        "frames_dropped",
+        "stream"
+      ],
+      "title": "HeartbeatExtra",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Body of ``POST /api/v1/ingest/heartbeat`` (every 5 s per camera).",
+  "properties": {
+    "camera_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+      "title": "Camera Id",
+      "type": "string"
+    },
+    "fps": {
+      "title": "Fps",
+      "type": "number"
+    },
+    "model_name": {
+      "minLength": 1,
+      "title": "Model Name",
+      "type": "string"
+    },
+    "model_version": {
+      "minLength": 1,
+      "title": "Model Version",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "ok",
+        "degraded"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "extra": {
+      "$ref": "#/$defs/HeartbeatExtra"
+    }
+  },
+  "required": [
+    "camera_id",
+    "fps",
+    "model_name",
+    "model_version",
+    "status",
+    "extra"
+  ],
+  "title": "HeartbeatPayload",
+  "type": "object"
+}

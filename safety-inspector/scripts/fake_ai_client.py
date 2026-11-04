@@ -15,7 +15,6 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
-from uuid import uuid4
 
 import httpx
 import websockets
@@ -222,7 +221,8 @@ async def run(args, key):
                         event = await http.post(
                             "api/v1/ingest/events",
                             json={
-                                "external_id": f"external-test-{uuid4()}",
+                                "external_id": f"{args.camera}-{int(time.time())}"
+                                "-88-ppe_violation",
                                 "camera_id": args.camera,
                                 "type": "ppe_violation",
                                 "confidence": 0.96,

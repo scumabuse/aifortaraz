@@ -235,6 +235,10 @@ def ingest_event(db, body, snapshot=None, source="ai"):
     if cooldown is None:
         cooldown = setting(db, "cooldown_sec", 60)
     if cooldown > 0:
+        # Event time, not receive time: events spooled by the AI during an outage arrive in
+        # a burst and must only be suppressed when they started within cooldown_sec of an
+        # incident of the same camera, zone, type and track (in either order).
+        window = timedelta(seconds=cooldown)
         existing = db.scalar(
             select(Incident)
             .where(
@@ -242,9 +246,10 @@ def ingest_event(db, body, snapshot=None, source="ai"):
                 Incident.zone_id == body.zone_id,
                 Incident.type_code == body.type,
                 Incident.track_id == body.track_id,
-                Incident.created_at >= utc_now() - timedelta(seconds=cooldown),
+                Incident.started_at > body.started_at - window,
+                Incident.started_at < body.started_at + window,
             )
-            .order_by(Incident.created_at.desc())
+            .order_by(Incident.started_at.desc())
             .limit(1)
         )
         if existing:
@@ -298,7 +303,7 @@ def ingest_event(db, body, snapshot=None, source="ai"):
         db.add(incident)
         db.flush()
         db.add(IngestReceipt(external_id=body.external_id, incident_id=incident.id))
-        record_event(db, incident, "created", payload={"source": source})
+        created = record_event(db, incident, "created", payload={"source": source})
         recipients = db.scalars(select(User)).all()
         notices = []
         for person in recipients:
@@ -313,11 +318,16 @@ def ingest_event(db, body, snapshot=None, source="ai"):
             )
             db.add(notification)
             notices.append(notification)
-        record_event(
+        notified = record_event(
             db,
             incident,
             "notified",
             payload={"channel": "inapp", "recipients": len(notices)},
+        )
+        # The timeline is ordered by time; a coarse clock (about 1 ms on Windows) can give
+        # both events the same timestamp, so "notified" is kept after "created".
+        notified.created_at = max(
+            notified.created_at, created.created_at + timedelta(microseconds=1)
         )
         enqueue_incident(db, incident)
         db.commit()

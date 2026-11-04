@@ -1,6 +1,8 @@
 """Authenticated realtime metadata hub with per-camera detection subscriptions."""
 
 import asyncio
+import json
+import logging
 import time
 from contextlib import suppress
 
@@ -17,6 +19,15 @@ from .models import Camera, User
 from .security import decode_token
 
 router = APIRouter()
+logger = logging.getLogger("inspector")
+
+
+def invalid_message(kind, error):
+    if isinstance(error, ValidationError):
+        first = error.errors()[0]
+        location = ".".join(str(part) for part in first["loc"])
+        return f"Invalid {kind}: {location}: {first['msg']}"[:300]
+    return f"Invalid {kind}: {getattr(error, 'detail', error)}"[:300]
 
 
 class LiveHub:
@@ -137,8 +148,22 @@ async def serve(websocket: WebSocket, ai: bool):
     async def receive():
         nonlocal last_received
         while True:
-            message = await websocket.receive_json()
+            frame = await websocket.receive()
+            if frame["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect(frame.get("code", 1000))
             last_received = time.monotonic()
+            # Malformed frames get an error reply and never close the connection.
+            if frame.get("text") is None:
+                hub.enqueue(
+                    queue,
+                    {"type": "error", "message": "Binary frames are not supported"},
+                )
+                continue
+            try:
+                message = json.loads(frame["text"])
+            except (ValueError, RecursionError):
+                hub.enqueue(queue, {"type": "error", "message": "Invalid JSON"})
+                continue
             if not isinstance(message, dict):
                 hub.enqueue(
                     queue, {"type": "error", "message": "Expected a JSON object"}
@@ -206,13 +231,16 @@ async def serve(websocket: WebSocket, ai: bool):
                         with SessionLocal() as db:
                             status = save_heartbeat(db, body)
                         await hub.broadcast({"type": "camera.status", **status})
-                except (ValidationError, HTTPException):
+                except (ValidationError, HTTPException) as error:
                     hub.enqueue(
                         queue,
-                        {
-                            "type": "error",
-                            "message": "Invalid metadata or unknown camera",
-                        },
+                        {"type": "error", "message": invalid_message(kind, error)},
+                    )
+                except Exception:
+                    logger.exception("Failed to process a %s message", kind)
+                    hub.enqueue(
+                        queue,
+                        {"type": "error", "message": f"Could not process {kind}"},
                     )
             else:
                 hub.enqueue(

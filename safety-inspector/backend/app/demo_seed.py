@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from sqlalchemy import insert, select
 
 from .database import SessionLocal
+from .incident_schemas import contract_external_id
 from .models import (
     Camera,
     Comment,
@@ -183,6 +184,7 @@ def snapshot(camera_name, when, boxes, title):
 
 
 def demo_details(kind, track=17):
+    """details of a synthetic event with exactly the keys of contract 4.1 for its type."""
     result = {
         "boxes": [
             {
@@ -346,11 +348,11 @@ def seed_demo_history(count=360, minutes=30 * 24 * 60):
                 if status in ("resolved", "false_positive")
                 else None
             )
-            external = f"demo-history-{state['generation']}-{index}"
-            incident_id = str(uuid5(NAMESPACE_URL, external))
+            external = contract_external_id(camera.id, start, index + 100, kind)
+            incident_id = str(
+                uuid5(NAMESPACE_URL, f"demo-history-{state['generation']}-{index}")
+            )
             details = demo_details(kind, index + 100)
-            if kind == "zone_intrusion":
-                details["zone_id"] = zone.id if zone else None
             snapshot_path, thumbnail_path = save_snapshot(
                 incident_id,
                 snapshot(camera.name, start, details["boxes"], types[kind].name_ru),

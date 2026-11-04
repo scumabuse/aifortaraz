@@ -73,6 +73,7 @@ class CameraIn(StrictModel):
 
 
 class ScheduleEntry(StrictModel):
+    # Zones are stored and edited with weekdays 0..6, Monday = 0 (zone editor API and UI).
     days: list[Annotated[int, Field(ge=0, le=6)]] = Field(min_length=1, max_length=7)
     from_: str = Field(alias="from", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     to: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -96,6 +97,15 @@ class ConfigRules(StrictModel):
     confirm_frames: Annotated[int, Field(ge=1, le=10000)] | None = None
     cooldown_sec: Annotated[int, Field(ge=0, le=86400)] | None = None
     severity_override: Severity | None = None
+
+
+class ContractScheduleEntry(ScheduleEntry):
+    # The AI contract (4.4) numbers weekdays 1..7 with 1 = Monday.
+    days: list[Annotated[int, Field(ge=1, le=7)]] = Field(min_length=1, max_length=7)
+
+
+class ContractRules(ConfigRules):
+    schedule: list[ContractScheduleEntry] | None = Field(default=None, max_length=30)
 
 
 class ZoneRules(ConfigRules):
@@ -186,6 +196,7 @@ class CameraOut(CameraIn):
     incidents_7d: int
     source: str | None = None
     relay_frame_age_sec: float | None = None
+    supported_ppe: list[str] | None = None
 
 
 class ConfigCamera(BaseModel):
@@ -209,14 +220,31 @@ class ConfigZone(BaseModel):
     rules: ConfigRules
 
 
+class ContractZone(ConfigZone):
+    rules: ContractRules
+
+
 class IngestConfig(BaseModel):
+    """GET /api/v1/ingest/config[/{camera_id}]: exactly the structure of contract 4.4."""
+
     camera: ConfigCamera
     frame_size_hint: tuple[int, int]
     thresholds: Thresholds
     ppe_types: list[str]
-    zones: list[ConfigZone]
+    zones: list[ContractZone]
     version: int
     updated_at: str
+
+
+class BrowserConfig(IngestConfig):
+    """GET /api/v1/cameras/{camera_id}/config for the zone editor.
+
+    Zones keep the editor's weekday numbering (0..6, Monday = 0); supported_ppe holds the
+    PPE codes reported by the latest AI heartbeat (null when unknown).
+    """
+
+    zones: list[ConfigZone]
+    supported_ppe: list[str] | None = None
 
 
 class KeyIn(StrictModel):

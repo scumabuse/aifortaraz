@@ -7,7 +7,6 @@ import getpass
 import io
 import json
 import os
-from uuid import uuid4
 
 import httpx
 from PIL import Image, ImageDraw
@@ -57,7 +56,9 @@ def main():
     output = io.BytesIO()
     image.save(output, "JPEG", quality=88)
     body = {
-        "external_id": args.external_id or str(uuid4()),
+        # Contract 4.1: {camera_id}-{unix_seconds_at_start}-{track_id}-{type}.
+        "external_id": args.external_id
+        or f"{args.camera}-{int(now.timestamp())}-{args.track}-{args.type}",
         "camera_id": args.camera,
         "zone_id": args.zone,
         "type": args.type,
@@ -92,7 +93,7 @@ def main():
                 "person_track_id": args.track,
                 "vehicle_track_id": 3,
             },
-            "zone_intrusion": {"zone_id": args.zone, "duration_sec": 12},
+            "zone_intrusion": {"duration_sec": 12},
             "overcrowding": {"count": 4, "max_persons": 2},
             "custom": {"title": "Тестовое событие"},
         }.get(args.type, {})

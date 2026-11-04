@@ -1,4 +1,6 @@
+import hashlib
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -8,6 +10,15 @@ password_hasher = PasswordHash.recommended()
 SECRET = os.environ["JWT_SECRET"]
 if len(SECRET) < 32:
     raise RuntimeError("JWT_SECRET must contain at least 32 characters")
+
+
+def new_api_key() -> str:
+    return "ot_" + secrets.token_urlsafe(32)
+
+
+def hash_api_key(raw: str) -> str:
+    # API keys are stored and looked up as unsalted SHA-256 hex digests.
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 def issue_token(user_id: str, token_type: str) -> str:

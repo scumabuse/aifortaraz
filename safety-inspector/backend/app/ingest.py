@@ -26,7 +26,15 @@ from .models import (
 )
 from .realtime import hub
 from .live_runtime import runtime
-from .stage_two import Ai, camera_or_404, iso, setting, status_payload
+from .stage_two import (
+    Ai,
+    camera_or_404,
+    iso,
+    setting,
+    status_payload,
+    supported_ppe,
+)
+from .storage import check_snapshot, decode_snapshot
 
 router = APIRouter(prefix="/api/v1/ingest", tags=["ingest"])
 logger = logging.getLogger("inspector")
@@ -82,10 +90,10 @@ async def parse_event(request: Request):
                     raise HTTPException(
                         422, "В multipart передайте снимок файлом snapshot"
                     )
-        return EventIn.model_validate(payload), snapshot
+        body = EventIn.model_validate(payload)
     except ValidationError as exc:
         raise RequestValidationError(exc.errors())
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         raise HTTPException(422, "Не удалось прочитать JSON события")
     except StarletteHTTPException as exc:
         if exc.status_code == 400:
@@ -94,6 +102,11 @@ async def parse_event(request: Request):
                 "Некорректная multipart-форма; ожидаются payload и один JPEG-файл snapshot",
             )
         raise
+    # Snapshot size and JPEG signature are checked before deduplication, so a malformed
+    # snapshot is always a 422/413 (contract 4.1, 4.8).
+    if snapshot is None:
+        snapshot = decode_snapshot(body.snapshot_base64)
+    return body, check_snapshot(snapshot)
 
 
 @router.post(
@@ -234,7 +247,14 @@ def save_heartbeat(db, body, source="ai"):
         body.model_name,
         body.model_version,
     )
-    row.last_heartbeat_at, row.extra = utc_now(), {**body.extra, "_source": source}
+    extra = {**body.extra, "_source": source}
+    if source != "ai":
+        # extra.supported_ppe describes the model of the latest AI heartbeat (contract 4.2);
+        # heartbeats of the demo generator neither set nor clear it.
+        extra.pop("supported_ppe", None)
+        if "supported_ppe" in (row.extra or {}):
+            extra["supported_ppe"] = row.extra["supported_ppe"]
+    row.last_heartbeat_at, row.extra = utc_now(), extra
     db.commit()
     if source == "ai":
         runtime.mark_real(camera.id)
@@ -338,6 +358,7 @@ async def expire_heartbeats():
                         "model_name": row.model_name,
                         "model_version": row.model_version,
                         "last_heartbeat_at": iso(row.last_heartbeat_at),
+                        "supported_ppe": supported_ppe(row),
                     }
                 )
         db.commit()

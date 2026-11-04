@@ -8,8 +8,7 @@ from sqlalchemy.orm import Session
 
 from .database import get_db
 from .models import ApiKey, User
-from .security import decode_token
-import hashlib
+from .security import decode_token, hash_api_key
 
 Db = Annotated[Session, Depends(get_db)]
 bearer = HTTPBearer(auto_error=False)
@@ -45,9 +44,10 @@ def require_roles(*roles: str):
 def find_api_key(db: Session, key: str | None):
     if not key:
         return None
-    digest = hashlib.sha256(key.encode()).hexdigest()
     return db.scalar(
-        select(ApiKey).where(ApiKey.key_hash == digest, ApiKey.revoked_at.is_(None))
+        select(ApiKey).where(
+            ApiKey.key_hash == hash_api_key(key), ApiKey.revoked_at.is_(None)
+        )
     )
 
 

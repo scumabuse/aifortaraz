@@ -1,0 +1,3 @@
+# docs/CONTRACT.md must stay byte-identical to the integration contract (sha256 is compared),
+# so Git never converts its line endings.
+docs/CONTRACT.md -text

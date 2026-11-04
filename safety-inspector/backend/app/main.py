@@ -122,6 +122,24 @@ async def http_error(request: Request, exc: StarletteHTTPException):
     )
 
 
+@app.exception_handler(Exception)
+async def unexpected_error(request: Request, exc: Exception):
+    # Any unexpected failure still answers with the contract error body (contract 4.8).
+    logger.error(
+        "Unhandled error on %s %s", request.method, request.url.path, exc_info=exc
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "code": "internal_error",
+                "message": "Внутренняя ошибка сервера. Подробности в журнале сервера",
+                "details": {},
+            }
+        },
+    )
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request, exc: RequestValidationError):
     return JSONResponse(

@@ -4,7 +4,6 @@ import os
 import random
 import time
 from datetime import timedelta, timezone
-from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from pydantic import Field
@@ -14,7 +13,7 @@ from starlette.concurrency import run_in_threadpool
 from .database import SessionLocal
 from .demo_seed import demo_details, seed_demo_history, snapshot, synthetic_objects
 from .dependencies import Db
-from .incident_schemas import EventIn, HeartbeatIn, StatsIn
+from .incident_schemas import EventIn, HeartbeatIn, StatsIn, contract_external_id
 from .incidents import ingest_event, serialize_incident
 from .ingest import publish_incident, save_heartbeat, save_stats
 from .live_runtime import runtime
@@ -106,20 +105,20 @@ def make_mock(camera_id, kind):
             .order_by(Zone.sort_order)
         )
         now = utc_now()
-        details = demo_details(kind, random.randint(10_000, 2_000_000_000))
-        if kind == "zone_intrusion":
-            details["zone_id"] = zone.id if zone else None
+        track = random.randint(10_000, 2_000_000_000)
+        # Mocks go through the same strict ingest validation as the AI module (contract 4.1).
         body = EventIn(
-            external_id=f"mock-{uuid4()}",
+            external_id=contract_external_id(camera_id, now, track, kind),
             camera_id=camera_id,
             zone_id=zone.id if zone else None,
             type=kind,
             confidence=0.94,
-            track_id=details["boxes"][0]["track_id"],
+            track_id=track,
             started_at=now,
             ended_at=now + timedelta(seconds=12),
-            details=details,
+            details=demo_details(kind, track),
         )
+        details = body.details
         raw = snapshot(camera.name, now, details["boxes"], kind_row.name_ru)
         incident, code, notices, _ = ingest_event(db, body, raw, source="mock")
         return (

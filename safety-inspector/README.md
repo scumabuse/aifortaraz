@@ -74,7 +74,9 @@ SQLite и снимки хранятся в `./data`. Переменные окр
 ## Подключение внешнего ИИ
 
 1. Войдите администратором. В «Настройки → API-ключи» создайте ключ и скопируйте
-   его при создании. Скопируйте UUID из раздела «Камеры».
+   его при создании. Скопируйте id камеры из раздела «Камеры» (демо-камеры: cam-1…cam-4).
+   Ключ `ai-module` создаётся при старте: из SEED_AI_API_KEY либо случайный, который
+   один раз печатается в консоль и сохраняется в `.secrets/ai_api_key`.
 2. Сохраните полигон и правила в редакторе зон. Проверьте конфигурацию через
    GET /api/v1/ingest/config/{camera_id} с заголовком X-API-Key.
 3. Запустите тестовый клиент из корня проекта:
@@ -103,6 +105,15 @@ Windows, индекс AVFoundation на macOS или `/dev/video0` на Linux.
 разрешать CORS. Браузерная webcam требует разрешения пользователя и
 localhost либо HTTPS.
 
+## Running with the other half
+
+This website is one half of the integration; the AI module is a separate repository
+(`safety-ai`). How to run both together is described in the
+[integration root README](../../README.md); the contract between them is
+[docs/CONTRACT.md](docs/CONTRACT.md). Ports: 8000 backend API, 5173 Vite dev frontend,
+8080 Docker (nginx) frontend, 8001 MJPEG streams of the AI module. The backend reads
+`SEED_AI_API_KEY`, `AI_CAMERAS`, `AI_MJPEG_BASE_URL` and `DEMO_MODE` (see `.env.example`).
+
 ## Telegram и отчёты
 
 В «Настройки → Уведомления» сохраните токен, Chat ID и подпись получателя.
@@ -126,6 +137,8 @@ npm --prefix frontend test
 npm --prefix frontend run lint
 npm --prefix frontend run build
 ```
+
+`make check` выполняет все эти проверки и ruff на Windows и Linux/macOS.
 
 `backend` — FastAPI, SQLAlchemy, миграции и шаблоны.
 `frontend` — React, Vite, Tailwind, Recharts и react-konva.

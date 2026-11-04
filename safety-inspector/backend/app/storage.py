@@ -10,6 +10,7 @@ from PIL import Image, UnidentifiedImageError
 from .database import DATABASE_URL
 
 MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024
+JPEG_MAGIC = b"\xff\xd8\xff"
 DATA_DIR = Path(
     os.getenv(
         "DATA_DIR",
@@ -36,11 +37,21 @@ def decode_snapshot(encoded: str | None):
     return raw
 
 
+def check_snapshot(raw: bytes | None):
+    """Cheap contract checks of an event snapshot before it is decoded by Pillow."""
+    if raw is None:
+        return None
+    if len(raw) > MAX_SNAPSHOT_BYTES:
+        raise HTTPException(413, "Размер снимка превышает 5 МБ")
+    if not raw.startswith(JPEG_MAGIC):
+        raise HTTPException(422, "Снимок должен быть JPEG (сигнатура FF D8 FF)")
+    return raw
+
+
 def save_snapshot(incident_id: str, raw: bytes | None):
     if raw is None:
         return None, None
-    if len(raw) > MAX_SNAPSHOT_BYTES:
-        raise HTTPException(413, "Размер снимка превышает 5 МБ")
+    check_snapshot(raw)
     paths = [
         SNAPSHOT_DIR / f"{incident_id}.jpg",
         SNAPSHOT_DIR / f"{incident_id}-thumb.jpg",

@@ -3,7 +3,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 
 from .dependencies import Db
 from .models import Camera, ComplianceStat, Incident, IncidentType, Zone, utc_now
@@ -117,16 +117,27 @@ def kpis(db, rows, reaction, stats):
     )
 
 
-def stats_rows(start, end, camera_ids):
-    return (
-        select(ComplianceStat)
-        .where(
-            ComplianceStat.camera_id.in_(camera_ids),
-            ComplianceStat.period_start >= start,
-            ComplianceStat.period_end <= end,
-        )
-        .subquery()
+def compliance_rows(*conditions):
+    """Statistics behind the compliance KPI (contract 4.3).
+
+    A camera with real statistics (source ai) under ``conditions`` is measured by those only;
+    mock statistics count only for cameras without real ones, so one camera never blends both.
+    """
+    real = select(ComplianceStat.camera_id).where(
+        *conditions, ComplianceStat.source == "ai"
     )
+    return select(ComplianceStat).where(
+        *conditions,
+        or_(ComplianceStat.source == "ai", ComplianceStat.camera_id.not_in(real)),
+    )
+
+
+def stats_rows(start, end, camera_ids):
+    return compliance_rows(
+        ComplianceStat.camera_id.in_(camera_ids),
+        ComplianceStat.period_start >= start,
+        ComplianceStat.period_end <= end,
+    ).subquery()
 
 
 def counts(db, rows, *columns):

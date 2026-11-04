@@ -30,3 +30,12 @@ class CredentialFilter(logging.Filter):
 def configure_logging():
     for name in ("uvicorn", "uvicorn.access", "uvicorn.error", "httpx"):
         logging.getLogger(name).addFilter(CredentialFilter())
+    application = logging.getLogger("inspector")
+    if not application.handlers and not logging.getLogger().handlers:
+        # Uvicorn configures only its own loggers; without a handler the application's
+        # INFO lines (for example the API key seeding notice) would be dropped.
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
+        handler.addFilter(CredentialFilter())
+        application.addHandler(handler)
+        application.setLevel(logging.INFO)

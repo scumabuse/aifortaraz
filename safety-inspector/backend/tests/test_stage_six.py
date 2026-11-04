@@ -26,22 +26,27 @@ def ingest_context(client):
     return admin, area, camera, {"X-API-Key": key["key"]}
 
 
-def create_event(client, camera, headers, external_id, severity="high", track=15):
+def create_event(client, camera, headers, severity="high", track=15):
+    from app.incident_schemas import contract_external_id
     from app.models import utc_now
 
+    started = utc_now()
     response = client.post(
         "/api/v1/ingest/events",
         headers=headers,
         json={
-            "external_id": external_id,
+            "external_id": contract_external_id(
+                camera["id"], started, track, "ppe_violation"
+            ),
             "camera_id": camera["id"],
             "type": "ppe_violation",
             "severity": severity,
-            "started_at": utc_now().isoformat(),
+            "started_at": started.isoformat(),
             "confidence": 0.91,
             "track_id": track,
             "details": {
                 "missing_ppe": ["helmet"],
+                "present_ppe": [],
                 "boxes": [
                     {
                         "bbox": [0.1, 0.1, 0.3, 0.3],
@@ -50,6 +55,7 @@ def create_event(client, camera, headers, external_id, severity="high", track=15
                         "conf": 0.91,
                     }
                 ],
+                "frame_size": [320, 180],
             },
             "snapshot_base64": base64.b64encode(image_bytes()).decode(),
         },
@@ -61,7 +67,7 @@ def create_event(client, camera, headers, external_id, severity="high", track=15
 def test_report_act_and_csv_lifecycle(client):
     admin, area, camera, key = ingest_context(client)
     viewer, _ = login(client, "viewer")
-    incident = create_event(client, camera, key, "stage-six-report")
+    incident = create_event(client, camera, key)
     root = f"/api/v1/incidents/{incident}/act"
     assert client.post(root + "/draft", headers=viewer).status_code == 403
     draft = client.post(root + "/draft", headers=admin)
@@ -146,11 +152,9 @@ def test_telegram_rules_dedupe_and_delivery_journal(client, monkeypatch):
         and saved.json()["has_token"]
     )
     try:
-        skipped = create_event(client, camera, key, "telegram-quiet")
-        sent = create_event(client, camera, key, "telegram-critical", "critical", 16)
-        cooldown = create_event(
-            client, camera, key, "telegram-cooldown", "critical", 17
-        )
+        skipped = create_event(client, camera, key)
+        sent = create_event(client, camera, key, "critical", 16)
+        cooldown = create_event(client, camera, key, "critical", 17)
         test = client.post(route + "/test", headers=admin, json={"chat_id": "-1001234"})
         assert test.status_code == 202
         jobs = {

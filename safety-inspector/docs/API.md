@@ -1,8 +1,8 @@
 # API — этап 3
 
 Префикс REST: `/api/v1`; Swagger: `/api/docs`; OpenAPI: `/api/openapi.json`.
-Swagger UI поставляется локально. Полный неизменённый исходный контракт раздела 6
-сохранён в [API-contract-original.txt](API-contract-original.txt).
+Swagger UI поставляется локально. Контракт интеграции с модулем ИИ — единый источник
+истины — в [CONTRACT.md](CONTRACT.md) (побайтная копия contract/CONTRACT.md корня интеграции).
 
 ## Авторизация и ошибки
 
@@ -33,7 +33,7 @@ Login/refresh возвращают access_token, refresh_token, token_type=beare
 | GET / PUT / DELETE | `/cameras/{id}` | просмотр / полная замена полей / удаление |
 | GET | `/cameras/{id}/status` | статус по последнему heartbeat |
 | POST | `/cameras/{id}/check-stream` | ограниченная по времени проверка HTTP(S)-превью/MJPEG |
-| GET | `/cameras/{id}/config` | браузерный экспорт того же JSON, что и у ingest/config |
+| GET | `/cameras/{id}/config` | JSON ingest/config для редактора зон: дни расписания в нумерации редактора (Пн=0) и supported_ppe |
 
 Тело POST/PUT:
 
@@ -53,6 +53,8 @@ Login/refresh возвращают access_token, refresh_token, token_type=beare
 ```
 
 stream_type: rtsp / mjpeg / hls / file / webcam. Координаты 0…1 или null.
+Камера в ответах GET содержит supported_ppe — коды СИЗ из extra.supported_ppe
+последнего heartbeat ИИ (null, если ИИ их не сообщал).
 Для webcam stream_url может быть пустым. Для file допустим путь `/demo/cam1.mp4`.
 Удаление камеры с инцидентами запрещено (409); без инцидентов удаляются также
 зоны, статус и compliance_stats. Проверка потока возвращает `{ok,message}`;
@@ -101,6 +103,8 @@ POST/PUT зон доступны admin/engineer, GET доступен всем �
 ненулевая площадь, без самопересечений, координаты 0…1. zone_type:
 ppe / danger / vehicle / counting. schedule=null — круглосуточно; дни Пн=0…Вс=6,
 время HH:mm в часовом поясе предприятия. Интервалы через полночь допустимы.
+ИИ получает дни по контракту 4.4: 1…7, Пн=1 — преобразование выполняется только
+в GET /ingest/config.
 confirm_frames: 1…10000, cooldown_sec: 0…86400; null наследуется из settings.
 max_persons: 1…10000 или null; дистанция: (0,1000] или null.
 regulation_ref и responsible_user_id сохраняются в правилах браузерного API;
@@ -112,6 +116,7 @@ GET `/ingest/config/{camera_id}` — один объект; GET `/ingest/config`
 таких объектов для камер с ai_enabled=true. Обязателен действующий X-API-Key.
 Включение камеры enabled и флаг ai_enabled — разные поля: коллекция фильтруется
 по ai_enabled, как указано в контракте. Отключённые зоны не выдаются ИИ.
+Дни расписания здесь 1…7 (Пн=1), как в контракте 4.4.
 
 ```json
 {
@@ -169,6 +174,10 @@ GET `/settings` — просмотр текущих настроек; GET `/sett
 - DELETE `/api-keys/{id}` — отзыв (повторный отзыв безопасен), запись остаётся
   в журнале. Повторное чтение config отозванным ключом даёт 401.
 
+Ключ модуля ИИ (`ai-module`) создаёт сид при старте: из SEED_AI_API_KEY (ключ
+заменяется при смене значения, в журнал пишется только факт), иначе один раз
+случайный — он печатается в stdout и сохраняется в `.secrets/ai_api_key`.
+
 
 ## Ingest событий — раздел 6.1
 
@@ -199,8 +208,13 @@ POST `/ingest/events` поддерживает два Content-Type:
 }
 ```
 
-X-API-Key обязателен. Время требует timezone и приводится к UTC. zone_id должен
-принадлежать camera_id. Коды типов инцидентов берутся из включённого справочника.
+X-API-Key обязателен. Время требует timezone и приводится к UTC. zone_id — null
+или зона этой камеры. details проверяются по типу с ключами раздела 4.1
+контракта, лишние ключи отклоняются; boxes (непустой список, label из словаря
+контракта) и frame_size обязательны. external_id =
+`{camera_id}-{unix_seconds}-{track_id}-{type}`, track_id — целое. Целые числа
+ограничены 64 битами; снимок должен начинаться с FF D8 FF. Ошибки — 422 с полями.
+Коды типов инцидентов берутся из включённого справочника.
 severity выбирается: явное значение → severity_override зоны → значение типа;
 для отсутствия каски в danger-зоне дефолт повышается до high. Бэкенд не вычисляет
 рамки, не анализирует СИЗ и не распознаёт людей: он проверяет форму присланных данных.
@@ -209,8 +223,10 @@ severity выбирается: явное значение → severity_override
 - **200**, повтор external_id: тот же id и текущие status/severity, deduplicated=true.
 - **202**, кулдаун: `{"deduplicated":true,"id":"<существующий инцидент>"}`.
 
-Кулдаун — camera + zone + type + track_id за cooldown_sec до текущего времени
-приёма сервером. null сравнивается как null. cooldown_sec=0 отключает правило.
+Кулдаун — camera + zone + type + track_id: событие подавляется, если его started_at
+отличается от started_at такого инцидента меньше чем на cooldown_sec. Сравнивается
+время события, а не приёма: очередь ИИ после сбоя связи доставляется без потерь.
+null сравнивается как null. cooldown_sec=0 отключает правило.
 Проверка и запись сериализуются блокировкой камеры, external_id защищён уникальным
 ключом. Внешние ID, подавленные кулдауном, записываются в служебную ingest_receipts:
 повтор такого ID всегда даёт 200 даже после кулдауна, а PATCH находит исходную запись.
@@ -271,6 +287,7 @@ POST `/ingest/stats`, раз в минуту:
 | assignee_id | UUID или unassigned |
 | q | поиск по id, external_id, имени камеры и зоны |
 | only_unacknowledged | true: только new |
+| source | ai, mock, manual; несколько через запятую |
 | page / page_size | страница от 1 / размер 1…100, по умолчанию 20 |
 | sort | started_at, created_at, severity, status; префикс - для обратного порядка |
 
@@ -311,7 +328,9 @@ POST `/incidents/bulk`, JSON `{ids:["..."],action:"acknowledge"}` либо
 GET `/analytics/summary` — оперативная SQL-сводка по тем же фильтрам:
 incidents_total, open_incidents, critical_incidents, mean_reaction_sec,
 compliance_percent, online_cameras, total_cameras. Compliance фильтруется по
-периоду/camera/area; средняя реакция — по инцидентам с acknowledged_at.
+периоду/camera/area: для камеры с реальной статистикой (source=ai) за период
+учитывается только она, демо-статистика — только для камер без реальной.
+Средняя реакция — по инцидентам с acknowledged_at.
 Полные аналитические графики, отчёты и печатные акты — последующие этапы.
 
 ## In-app уведомления
@@ -358,7 +377,10 @@ unsubscribe с теми же полями снимает подписку. Он�
 ИИ передаёт detections, heartbeat и JPEG-кадры по ws/ingest. Detections проверяются по схеме, не сохраняются в БД,
 пересылаются только подписанным клиентам. Сообщение соответствует разделу 6.3:
 type, camera_id, ts, frame_id, objects (track_id,label,bbox,conf,ppe,zones,state).
-state — ok / violation / danger. При подписке выдаётся последнее состояние камеры.
+state — ok / violation / danger. Значения ppe: true / false / null (null — неизвестно),
+ключи — коды СИЗ; null пересылается браузеру без изменений. При подписке выдаётся
+последнее состояние камеры. Некорректный JSON, бинарный кадр или неверное сообщение
+дают ответ `{"type":"error","message":"..."}`; соединение не закрывается.
 
 Ping каждые 20 с, ответ `{type:"pong"}`; клиентский ping тоже получает pong.
 После 60 с отсутствия сообщений клиент закрывается с 4408. У медленного клиента

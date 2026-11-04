@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, case, func, or_, select, update
 
+from .analytics import compliance_rows
 from .dependencies import Db
 from .incident_schemas import (
     AssignIn,
@@ -42,6 +43,7 @@ from .realtime import hub
 from .stage_two import Reader, iso, status_payload
 
 router = APIRouter(prefix="/api/v1", tags=["incidents"])
+SOURCES = ("ai", "mock", "manual")
 
 
 class Filters:
@@ -59,6 +61,13 @@ class Filters:
         assignee_id: str | None = None,
         q: Annotated[str, Query(max_length=250)] = "",
         only_unacknowledged: bool = False,
+        source: Annotated[
+            str | None,
+            Query(
+                max_length=100,
+                description="ai, mock or manual; several values separated by commas",
+            ),
+        ] = None,
     ):
         for value in (from_, to):
             if value is not None and value.tzinfo is None:
@@ -87,11 +96,20 @@ class Filters:
         )
         if len(self.camera_ids) > 100:
             raise HTTPException(422, "Допускается не более 100 камер в фильтре")
+        self.sources = list(
+            dict.fromkeys(
+                value.strip() for value in (source or "").split(",") if value.strip()
+            )
+        )
+        if not set(self.sources).issubset(SOURCES):
+            raise HTTPException(422, "Источник инцидента: ai, mock или manual")
 
     def conditions(self):
         result = []
         if self.camera_ids:
             result.append(Incident.camera_id.in_(self.camera_ids))
+        if self.sources:
+            result.append(Incident.source.in_(self.sources))
         for column, value in [
             (Incident.camera_id, self.camera_id),
             (Camera.area_id, self.area_id),
@@ -507,19 +525,27 @@ def summary(db: Db, user: Reader, filters: FilterDependency):
             func.avg(reaction),
         ).select_from(query)
     ).one()
-    stats_query = select(
-        func.sum(ComplianceStat.persons_total),
-        func.sum(ComplianceStat.persons_compliant),
-    ).join(Camera, Camera.id == ComplianceStat.camera_id)
+    conditions = []
     if filters.camera_id:
-        stats_query = stats_query.where(ComplianceStat.camera_id == filters.camera_id)
+        conditions.append(ComplianceStat.camera_id == filters.camera_id)
     if filters.area_id:
-        stats_query = stats_query.where(Camera.area_id == filters.area_id)
+        conditions.append(
+            ComplianceStat.camera_id.in_(
+                select(Camera.id).where(Camera.area_id == filters.area_id)
+            )
+        )
     if filters.from_:
-        stats_query = stats_query.where(ComplianceStat.period_start >= filters.from_)
+        conditions.append(
+            ComplianceStat.period_start >= filters.from_.astimezone(timezone.utc)
+        )
     if filters.to:
-        stats_query = stats_query.where(ComplianceStat.period_end <= filters.to)
-    persons, compliant = db.execute(stats_query).one()
+        conditions.append(
+            ComplianceStat.period_end <= filters.to.astimezone(timezone.utc)
+        )
+    stats = compliance_rows(*conditions).subquery()
+    persons, compliant = db.execute(
+        select(func.sum(stats.c.persons_total), func.sum(stats.c.persons_compliant))
+    ).one()
     camera_query = select(Camera)
     if filters.camera_id:
         camera_query = camera_query.where(Camera.id == filters.camera_id)

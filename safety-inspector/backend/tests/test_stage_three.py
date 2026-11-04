@@ -1,9 +1,9 @@
 import base64
 import io
+import itertools
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from uuid import uuid4
 
 import pytest
 from PIL import Image
@@ -55,11 +55,23 @@ def setup(client):
     }
 
 
+SECONDS = itertools.count(1_762_179_667)
+
+
+def renewed(body, **changes):
+    """The event with a new contract external_id {camera_id}-{seconds}-{track_id}-{type}."""
+    body = {**body, **changes}
+    seconds = next(SECONDS)
+    return {
+        **body,
+        "external_id": f"{body['camera_id']}-{seconds}-{body['track_id']}-{body['type']}",
+    }
+
+
 def event(setup, **changes):
     from app.models import utc_now
 
-    return {
-        "external_id": str(uuid4()),
+    body = {
         "camera_id": setup["camera"]["id"],
         "zone_id": setup["zone"]["id"],
         "type": "ppe_violation",
@@ -79,8 +91,8 @@ def event(setup, **changes):
             ],
             "frame_size": [640, 360],
         },
-        **changes,
     }
+    return renewed(body, **changes)
 
 
 def jpeg():
@@ -152,7 +164,7 @@ def test_multipart_and_deduplication(client, setup):
     cooldown = client.post(
         "/api/v1/ingest/events",
         headers=setup["key"],
-        json={**body, "external_id": str(uuid4())},
+        json=renewed(body),
     )
     assert cooldown.status_code == 202
     assert (
@@ -167,8 +179,8 @@ def test_multipart_and_deduplication(client, setup):
 def test_cooldown_partition_and_override(client, setup):
     first = event(setup)
     post(client, setup, first)
-    post(client, setup, {**first, "external_id": str(uuid4()), "track_id": 18})
-    post(client, setup, {**first, "external_id": str(uuid4()), "zone_id": None})
+    post(client, setup, renewed(first, track_id=18))
+    post(client, setup, renewed(first, zone_id=None))
     response = client.put(
         f"/api/v1/zones/{setup['zone']['id']}",
         headers=setup["headers"],
@@ -180,14 +192,14 @@ def test_cooldown_partition_and_override(client, setup):
         },
     )
     assert response.status_code == 200
-    incident_id = post(client, setup, {**first, "external_id": str(uuid4())})
+    incident_id = post(client, setup, renewed(first))
     assert (
         client.get(f"/api/v1/incidents/{incident_id}", headers=setup["headers"]).json()[
             "severity"
         ]
         == "critical"
     )
-    post(client, setup, {**first, "external_id": str(uuid4()), "severity": "low"})
+    post(client, setup, renewed(first, severity="low"))
 
 
 def test_external_id_is_concurrency_safe(client, setup):
@@ -620,7 +632,7 @@ def test_swagger_documents_both_ingest_formats(client):
 
 def test_concurrent_cooldown_and_acknowledgement(client, setup):
     first = event(setup)
-    bodies = [{**first, "external_id": str(uuid4())} for _ in range(4)]
+    bodies = [renewed(first) for _ in range(4)]
     with ThreadPoolExecutor(max_workers=4) as executor:
         responses = list(
             executor.map(
@@ -661,7 +673,7 @@ def test_suppressed_external_id_survives_cooldown_and_can_be_patched(client, set
 
     original = event(setup)
     incident_id = post(client, setup, original)
-    suppressed = {**original, "external_id": f"source/{uuid4()}/event"}
+    suppressed = renewed(original)
     response = client.post(
         "/api/v1/ingest/events", headers=setup["key"], json=suppressed
     )

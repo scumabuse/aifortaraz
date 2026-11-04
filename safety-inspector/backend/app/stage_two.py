@@ -1,5 +1,3 @@
-import hashlib
-import secrets
 from datetime import timedelta, timezone
 from typing import Annotated
 
@@ -8,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import Integer, String, cast, delete, func, select, update
 
 from .dependencies import Db, current_user, require_api_key, require_roles
+from .incident_schemas import PPE_CODES
 from .models import (
     ApiKey,
     Area,
@@ -22,6 +21,7 @@ from .models import (
 )
 from .realtime import hub
 from .schemas import (
+    BrowserConfig,
     CameraIn,
     CameraOut,
     ConfigRules,
@@ -34,6 +34,7 @@ from .schemas import (
     ZoneIn,
     ZoneOut,
 )
+from .security import hash_api_key, new_api_key
 
 router = APIRouter(prefix="/api/v1")
 Reader = Annotated[User, Depends(current_user)]
@@ -84,6 +85,18 @@ def bump_config(db):
     return version + 1
 
 
+def supported_ppe(row):
+    """PPE codes of extra.supported_ppe of the latest AI heartbeat; None when unknown.
+
+    extra is free-form (contract 4.2), so a malformed value is treated as absent and codes
+    outside the contract list are ignored instead of failing the heartbeat.
+    """
+    value = (row.extra or {}).get("supported_ppe") if row is not None else None
+    if not isinstance(value, list):
+        return None
+    return [code for code in PPE_CODES if code in value]
+
+
 def status_payload(db, camera):
     import time
     from .live_runtime import runtime
@@ -114,6 +127,7 @@ def status_payload(db, camera):
         "model_name": row.model_name if row else None,
         "model_version": row.model_version if row else None,
         "last_heartbeat_at": iso(row.last_heartbeat_at) if row else None,
+        "supported_ppe": supported_ppe(row),
     }
 
 
@@ -367,7 +381,19 @@ async def delete_zone(zone_id: str, db: Db, user: Editor):
     return {"deleted": True}
 
 
-def build_config(db, camera):
+def contract_schedule(schedule):
+    """Zone schedule as sent to the AI module.
+
+    Zones are stored with weekdays 0..6, Monday = 0 (the zone editor API and UI keep that),
+    while contract 4.4 numbers them 1..7 with 1 = Monday. The conversion happens only here,
+    at the ingest boundary.
+    """
+    if schedule is None:
+        return None
+    return [{**entry, "days": [day + 1 for day in entry["days"]]} for entry in schedule]
+
+
+def build_config(db, camera, for_ai=True):
     thresholds = {
         key: setting(db, key, fallback)
         for key, fallback in [
@@ -390,16 +416,18 @@ def build_config(db, camera):
         for key in ("confirm_frames", "cooldown_sec"):
             if rules.get(key) is None:
                 rules[key] = thresholds[key]
+        if for_ai:
+            rules["schedule"] = contract_schedule(rules.get("schedule"))
         zones.append(
             {
                 "id": zone.id,
                 "name": zone.name,
                 "type": zone.zone_type,
                 "polygon": zone.polygon,
-                "rules": ConfigRules(**rules),
+                "rules": rules,
             }
         )
-    return IngestConfig(
+    values = dict(
         camera={
             key: getattr(camera, key)
             for key in ("id", "name", "stream_url", "stream_type")
@@ -416,6 +444,11 @@ def build_config(db, camera):
         zones=zones,
         version=int(setting(db, "config_version", 1)),
         updated_at=setting(db, "config_updated_at", iso(camera.created_at)),
+    )
+    if for_ai:
+        return IngestConfig(**values)
+    return BrowserConfig(
+        **values, supported_ppe=supported_ppe(db.get(CameraStatus, camera.id))
     )
 
 
@@ -435,10 +468,10 @@ def ingest_config(camera_id: str, db: Db, key: Ai):
 
 
 @router.get(
-    "/cameras/{camera_id}/config", response_model=IngestConfig, tags=["cameras"]
+    "/cameras/{camera_id}/config", response_model=BrowserConfig, tags=["cameras"]
 )
 def browser_config(camera_id: str, db: Db, user: Reader):
-    return build_config(db, camera_or_404(db, camera_id))
+    return build_config(db, camera_or_404(db, camera_id), for_ai=False)
 
 
 @router.get("/zone-responsibles", tags=["zones"])
@@ -483,8 +516,8 @@ def list_keys(db: Db, user: Admin):
 
 @router.post("/api-keys", response_model=KeyCreated, status_code=201, tags=["api-keys"])
 def create_key(body: KeyIn, db: Db, user: Admin):
-    raw = "ot_" + secrets.token_urlsafe(32)
-    row = ApiKey(name=body.name, key_hash=hashlib.sha256(raw.encode()).hexdigest())
+    raw = new_api_key()
+    row = ApiKey(name=body.name, key_hash=hash_api_key(raw))
     db.add(row)
     db.commit()
     return {**key_payload(row), "key": raw}

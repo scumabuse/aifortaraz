@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>{{ title }}</title>
+<style>
+@page { size:A4; margin:14mm }
+* { box-sizing:border-box }
+body { font:14px/1.5 Arial,sans-serif; color:#17232d; max-width:1000px; margin:24px auto; padding:0 20px }
+h1 { line-height:1.2; margin:6px 0 } h2 { font-size:17px }
+header { border-bottom:2px solid #29745c; padding-bottom:12px }
+.muted { color:#465b66 }
+table { width:100%; border-collapse:collapse; margin:12px 0 18px }
+th,td { border:1px solid #c6d0d6; padding:6px 8px; vertical-align:top; text-align:left; overflow-wrap:anywhere }
+th { background:#e9f2ef }
+img { max-width:100%; display:block }
+.kpis { display:flex; flex-wrap:wrap; gap:10px; padding:12px 0 }
+.kpis div { min-width:115px; padding:8px 10px; border:1px solid #c6d0d6 }
+.kpis b { display:block; font-size:19px }
+.spark { display:flex; gap:2px; height:82px; align-items:end; border-bottom:1px solid #8599a2 }
+.spark span { flex:1; min-width:0; background:#29745c }
+.bar { height:9px; background:#29745c; min-width:2px }
+.pre { white-space:pre-wrap; overflow-wrap:anywhere }
+.figure { position:relative; display:table; margin:14px 0 }
+.figure img { max-height:340px }
+.box { position:absolute; border:2px solid #fa4141; pointer-events:none }
+.signatures { display:flex; flex-wrap:wrap; gap:35px; margin:28px 0 }
+@media print {
+  body { margin:0; padding:0; print-color-adjust:exact }
+  tr,figure,.kpis,.signatures { break-inside:avoid }
+  thead { display:table-header-group }
+}
+</style>
+</head>
+<body>{% block content %}{% endblock %}</body>
+</html>

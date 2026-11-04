@@ -1,0 +1,47 @@
+{% extends "document.html" %}
+{% block content %}
+<header>
+  <div>{{ enterprise }} · {{ workshop }}</div>
+  <h1>{{ title }}</h1>
+  <div>{{ area }} · {{ start }} — {{ end }}</div>
+  <div class="muted">Составил {{ author }}</div>
+</header>
+{% if kind == "prescription" %}
+<h2>Требуемые меры</h2><p class="pre">{{ measures }}</p><p>Срок устранения {{ deadline.strftime('%d.%m.%Y') }}</p>
+{% else %}
+<div class="kpis">
+  <div><b>{{ data.current.incidents_total }}</b>Инциденты</div>
+  <div><b>{{ data.current.open_incidents }}</b>Открытые</div>
+  <div><b>{{ data.current.critical_incidents }}</b>Критические</div>
+  <div><b>{{ ('%.2f %%'|format(data.current.compliance_percent)) if data.current.compliance_percent is not none else '—' }}</b>СИЗ</div>
+  <div><b>{{ ('%.1f с'|format(data.current.mean_reaction_sec)) if data.current.mean_reaction_sec is not none else '—' }}</b>Средняя реакция</div>
+</div>
+<h2>Динамика по дням</h2>
+<div class="spark" aria-label="Динамика инцидентов по дням">
+  {% for day, count in daily %}<span title="{{ day }} · {{ count }}" style="height:{{ 100 * count / daily_max }}%"></span>{% endfor %}
+</div>
+{% if daily %}<div class="muted">{{ daily[0][0] }} — {{ daily[-1][0] }}</div>{% endif %}
+<h2>Типы инцидентов</h2>
+<table><tbody>{% for entry in data.by_type %}
+<tr><th>{{ entry.name }}</th><td>{{ entry.count }}</td><td style="width:35%"><div class="bar" style="width:{{ 100 * entry.count / max_type }}%"></div></td></tr>
+{% else %}<tr><td>Нет инцидентов за период</td></tr>{% endfor %}</tbody></table>
+<h2>Сводка по камерам</h2>
+<table><thead><tr><th>Камера</th><th>Инциденты</th><th>Критические</th><th>Реакция, с</th><th>Предыдущий период</th></tr></thead><tbody>
+{% for camera in data.cameras %}<tr><td>{{ camera.name }}</td><td>{{ camera.count }}</td><td>{{ camera.critical }}</td><td>{{ camera.reaction if camera.reaction is not none else '—' }}</td><td>{{ camera.previous }}</td></tr>
+{% else %}<tr><td colspan="5">Нет камер по выбранному фильтру</td></tr>{% endfor %}
+</tbody></table>
+{% if top_camera and top_camera.count %}
+<p>Больше всего инцидентов зарегистрировано на камере «{{ top_camera.name }}» ({{ top_camera.count }}).
+{% if peak and peak[1] %}Максимум за день — {{ peak[0] }} ({{ peak[1] }}).{% endif %}
+{% if peak_hour %}Наиболее частый час — {{ peak_hour[0] }}:00 ({{ peak_hour[1] }}).{% endif %}</p>
+{% endif %}
+{% endif %}
+<h2>Инциденты</h2>
+<table><thead><tr><th>Время</th><th>Тип и критичность</th><th>Камера и зона</th><th>Статус и ответственный</th><th>Снимок</th></tr></thead><tbody>
+{% for item in items %}<tr><td>{{ item.time }}</td><td>{{ item.type_name }} · {{ item.severity_label }}</td>
+<td>{{ item.camera_name }} · {{ item.zone_name or '—' }}</td><td>{{ item.status_label }} · {{ item.assignee_name or '—' }}</td>
+<td>{% if item.image %}<img width="106" src="{{ item.image }}" alt="Снимок инцидента">{% else %}—{% endif %}</td></tr>
+{% else %}<tr><td colspan="5">Инцидентов за период нет</td></tr>{% endfor %}
+</tbody></table>
+{% if kind == "prescription" %}<div class="signatures"><span>Выдал __________________</span><span>Получил __________________</span></div>{% endif %}
+{% endblock %}

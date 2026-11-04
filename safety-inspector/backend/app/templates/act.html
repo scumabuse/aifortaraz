@@ -1,0 +1,24 @@
+{% extends "document.html" %}
+{% block content %}
+<header>
+  <div>{{ act.enterprise }} · {{ act.workshop }}</div>
+  <h1>{{ title }}</h1><b>{{ number }}</b>
+  <div class="muted">Составил {{ author }}</div>
+</header>
+<table><tbody>
+<tr><th>Время события</th><td>{{ act.time }}</td></tr>
+<tr><th>Участок</th><td>{{ act.area }}</td></tr>
+<tr><th>Камера и зона</th><td>{{ act.camera }} · {{ act.zone }}</td></tr>
+<tr><th>Вид нарушения</th><td>{{ act.violation }}</td></tr>
+<tr><th>Пункт инструкции</th><td>{{ act.regulation or '—' }}</td></tr>
+<tr><th>Ответственный</th><td>{{ act.responsible or '—' }}</td></tr>
+<tr><th>Срок устранения</th><td>{{ act.deadline or '—' }}</td></tr>
+</tbody></table>
+<h2>Описание</h2><p class="pre">{{ act.description }}</p>
+{% if image %}
+<figure class="figure"><img src="{{ image }}" alt="Снимок нарушения">
+{% if box %}<div class="box" style="left:{{ box[0]*100 }}%;top:{{ box[1]*100 }}%;width:{{ box[2]*100 }}%;height:{{ box[3]*100 }}%"></div>{% endif %}</figure>
+{% endif %}
+<h2>Принятые меры</h2><p class="pre">{{ act.measures or '—' }}</p>
+<div class="signatures"><span>Составил __________________</span><span>Ознакомлен __________________</span></div>
+{% endblock %}

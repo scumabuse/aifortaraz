@@ -1,0 +1,565 @@
+.incident-filters {
+  margin-bottom: 22px;
+}
+.filter-search {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid #3d4f5c;
+  background: #111b23;
+  border-radius: 7px;
+  padding: 11px 14px;
+  margin-bottom: 20px;
+  color: #88a193;
+}
+.filter-search input {
+  outline: none;
+  flex: 1;
+  background: transparent;
+  font-size: 14px;
+  min-width: 0;
+}
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+.filter-grid label,
+.pagination > label {
+  display: grid;
+  gap: 7px;
+  font-size: 12px;
+  color: #93a7b7;
+}
+.filter-grid input,
+.filter-grid select,
+.sort-control select,
+.pagination select {
+  background: #111b23;
+  border: 1px solid #354956;
+  padding: 9px;
+  border-radius: 6px;
+  color: #c7d6e0;
+  min-width: 0;
+  font-size: 13px;
+}
+.filter-grid input:disabled,
+.filter-grid select:disabled {
+  opacity: 0.5;
+}
+.filter-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 18px;
+  color: #95aab9;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.filter-bottom .check-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.incident-filters input[type="checkbox"],
+.incident-table input[type="checkbox"],
+.incident-card input[type="checkbox"] {
+  accent-color: #65d9b2;
+  width: 16px;
+  height: 16px;
+}
+.incident-list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin: 20px 0;
+  flex-wrap: wrap;
+}
+.sort-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #9aafbd;
+  font-size: 12px;
+  margin-left: auto;
+}
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  flex-wrap: wrap;
+  padding: 13px 0 20px;
+  font-size: 13px;
+}
+.incident-table {
+  padding: 0;
+}
+.incident-table table {
+  min-width: 1330px;
+  font-size: 12px;
+}
+.incident-table td,
+.incident-table th {
+  padding: 15px 12px;
+  vertical-align: middle;
+}
+.incident-table th {
+  font-size: 11px;
+}
+.incident-table td small {
+  display: block;
+  color: #6e8697;
+  font-size: 10px;
+  margin-top: 6px;
+}
+.incident-table td > time {
+  white-space: nowrap;
+}
+.incident-table .incident-actions button {
+  font-size: 12px;
+  padding: 7px 11px;
+}
+.id-short {
+  font-family: monospace;
+}
+.severity-badge,
+.incident-status {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  padding: 5px 8px;
+}
+.severity-low {
+  color: #a0b6cc;
+  background: #253646;
+  border-color: #435d76;
+}
+.severity-medium {
+  color: #edc569;
+  background: #3d3420;
+  border-color: #73602d;
+}
+.severity-high {
+  color: #f5ac73;
+  background: #422b1f;
+  border-color: #805131;
+}
+.severity-critical {
+  color: #ff9ca5;
+  background: #49232b;
+  border-color: #99505c;
+}
+.incident-status {
+  color: #a2b3bf;
+  background: #24313b;
+  border-color: #3e5261;
+  font-weight: 400;
+}
+.status-new {
+  color: #9adbc7;
+  border-color: #3b7362;
+  background: #223b33;
+}
+.status-resolved {
+  color: #8a9aa8;
+  background: #202b34;
+}
+.status-false_positive {
+  color: #b5a5d8;
+  background: #322d44;
+  border-color: #5f527b;
+}
+.incident-snapshot {
+  position: relative;
+  overflow: hidden;
+  background: #202e38;
+  border: 1px solid #354b5b;
+  border-radius: 8px;
+  width: 100%;
+  isolation: isolate;
+}
+.incident-snapshot > img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.incident-snapshot > svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.incident-snapshot.thumbnail {
+  width: 96px;
+  min-width: 96px;
+  border-radius: 5px;
+}
+.incident-snapshot.thumbnail img {
+  object-fit: cover;
+}
+.snapshot-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: center;
+  justify-content: center;
+  color: #6a8899;
+  font-size: 13px;
+}
+.incident-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+.incident-card {
+  display: grid;
+  gap: 15px;
+  padding: 18px;
+}
+.incident-card .incident-snapshot.thumbnail {
+  width: 100%;
+  aspect-ratio: 16/9;
+}
+.incident-card h2 {
+  font-size: 16px;
+  line-height: 1.5;
+}
+.incident-card p {
+  font-size: 12px;
+  line-height: 1.7;
+  color: #a6b8c6;
+}
+.incident-card small {
+  color: #6f899b;
+}
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  margin-top: 25px;
+  font-size: 12px;
+  color: #8ba2b2;
+  flex-wrap: wrap;
+}
+.pagination > label {
+  display: flex;
+  align-items: center;
+  margin-right: auto;
+}
+.incident-detail-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(300px, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.incident-detail-main {
+  display: grid;
+  gap: 24px;
+}
+.incident-detail-layout aside {
+  display: grid;
+  gap: 24px;
+}
+.snapshot-caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #879fad;
+  font-size: 12px;
+  gap: 15px;
+  padding: 16px 0;
+  flex-wrap: wrap;
+}
+.incident-description {
+  font-size: 15px;
+  line-height: 1.8;
+  margin: 8px 0 23px;
+}
+.incident-id {
+  font-family: monospace;
+  font-size: 12px !important;
+  overflow-wrap: anywhere;
+}
+.incident-clip {
+  display: block;
+  width: 100%;
+  margin-top: 20px;
+  border: 1px solid #36515f;
+  border-radius: 8px;
+}
+.incident-links {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid #2d3d49;
+}
+.metadata-panel .metadata {
+  margin-top: 22px;
+  font-size: 12px;
+}
+.metadata-panel .metadata > div {
+  grid-template-columns: 115px 1fr;
+  gap: 15px;
+  line-height: 1.6;
+}
+.metadata-panel dd {
+  color: #ccdae3;
+}
+.resolution-note {
+  font-size: 13px;
+  margin-top: 22px;
+  line-height: 1.8;
+}
+.resolution-note strong {
+  color: #7cd8b4;
+}
+.resolution-note p {
+  margin-top: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.comment-list {
+  margin-top: 20px;
+}
+.comment-list article {
+  padding: 18px 0;
+  border-bottom: 1px solid #2c3d48;
+}
+.comment-list article > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 15px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.comment-list time {
+  color: #728d9f;
+  font-size: 11px;
+}
+.comment-list p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #aebfc9;
+  font-size: 14px;
+  line-height: 1.8;
+  margin-top: 12px;
+}
+.comments-panel .edit-form > button {
+  justify-self: start;
+}
+.empty-hint {
+  font-size: 13px;
+  line-height: 1.9;
+  margin: 25px 0;
+}
+.timeline {
+  display: grid;
+  gap: 0;
+  margin: 23px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.timeline > li {
+  display: flex;
+  gap: 14px;
+  position: relative;
+  padding: 0 0 25px;
+}
+.timeline > li:before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 13px;
+  width: 1px;
+  bottom: 0;
+  background: #35515e;
+}
+.timeline > li:last-child:before {
+  display: none;
+}
+.timeline-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 4px;
+  background: #6b9989;
+}
+.timeline-dot.event-false_positive {
+  background: #a391c1;
+}
+.timeline-dot.event-resolved {
+  background: #6da493;
+}
+.timeline strong {
+  font-size: 13px;
+}
+.timeline small {
+  display: block;
+  color: #6f8b9e;
+  font-size: 11px;
+  margin-top: 7px;
+  line-height: 1.7;
+}
+.timeline p {
+  font-size: 12px;
+  line-height: 1.8;
+  color: #a5bac7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin-top: 8px;
+}
+.incident-navigation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 25px;
+  gap: 15px;
+}
+.dashboard-live {
+  margin-top: 30px;
+}
+.incident-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.incident-kpis > div {
+  display: grid;
+  gap: 18px;
+}
+.incident-kpis span {
+  font-size: 12px;
+  color: #8ea6b5;
+}
+.incident-kpis strong {
+  font-size: 30px;
+  font-weight: 600;
+  color: #cce5da;
+}
+.feed-panel .panel-heading > a {
+  font-size: 12px;
+}
+.feed-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  border-top: 1px solid #2e3f4a;
+  padding: 18px 0;
+}
+.feed-row > div:nth-child(2) {
+  flex: 1;
+}
+.feed-row strong {
+  font-size: 13px;
+}
+.feed-row p {
+  color: #8da5b5;
+  font-size: 12px;
+  margin: 7px 0;
+}
+.feed-row small {
+  color: #617e91;
+  font-size: 11px;
+}
+.feed-row .incident-actions button {
+  font-size: 12px;
+}
+.progress-track span {
+  width: 42.85%;
+}
+@media (min-width: 1700px) {
+  .incident-kpis {
+    grid-template-columns: repeat(6, 1fr);
+  }
+}
+@media (max-width: 1200px) {
+  .filter-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .incident-cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .incident-detail-layout {
+    grid-template-columns: 1fr;
+  }
+  .feed-row > .severity-badge {
+    display: none;
+  }
+  .feed-row {
+    gap: 12px;
+  }
+  .feed-row > .incident-status {
+    display: none;
+  }
+}
+@media (max-width: 700px) {
+  .incident-kpis {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+  .incident-kpis > div {
+    padding: 15px;
+    gap: 13px;
+  }
+  .incident-kpis strong {
+    font-size: 25px;
+  }
+  .incident-kpis span {
+    font-size: 11px;
+  }
+  .incident-cards {
+    grid-template-columns: 1fr;
+  }
+  .filter-grid {
+    gap: 12px;
+  }
+  .filter-grid label {
+    font-size: 11px;
+  }
+  .filter-grid select {
+    max-width: 100%;
+    font-size: 12px;
+  }
+  .incident-list-toolbar {
+    gap: 15px;
+  }
+  .sort-control {
+    margin-left: 0;
+  }
+  .incident-detail-layout .panel {
+    padding: 17px;
+  }
+  .feed-row {
+    flex-wrap: wrap;
+  }
+  .feed-row .incident-snapshot.thumbnail {
+    width: 75px;
+    min-width: 75px;
+  }
+  .feed-row .incident-actions {
+    margin-left: auto;
+  }
+  .incident-navigation button {
+    font-size: 12px;
+  }
+  .pagination {
+    justify-content: center;
+  }
+  .snapshot-caption {
+    font-size: 11px;
+  }
+  .metadata-panel .metadata > div {
+    grid-template-columns: 115px 1fr;
+  }
+}

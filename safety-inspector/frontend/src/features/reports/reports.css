@@ -1,0 +1,23 @@
+.report-document,
+.report-history {
+  margin-top: 16px;
+}
+.report-document iframe {
+  width: 100%;
+  min-height: 650px;
+  background: #fff;
+  border: 1px solid #657782;
+  border-radius: 8px;
+}
+.report-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+}
+.report-history h2 {
+  margin-bottom: 14px;
+}
+.report-pagination {
+  margin-top: 12px;
+}

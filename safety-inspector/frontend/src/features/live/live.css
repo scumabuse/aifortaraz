@@ -1,0 +1,455 @@
+.live-controls {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+  padding: 16px 20px;
+}
+.layout-switcher {
+  display: flex;
+  gap: 7px;
+}
+.layout-switcher button {
+  padding: 8px 14px;
+  font-size: 13px;
+}
+.overlay-switches {
+  display: flex;
+  gap: 17px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.overlay-switches label {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  font-size: 12px;
+  color: #a4b8c5;
+}
+.overlay-switches input,
+.demo-settings input {
+  accent-color: #65d9b2;
+}
+.live-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 290px;
+  gap: 22px;
+  align-items: start;
+}
+.camera-grid {
+  display: grid;
+  gap: 16px;
+}
+.camera-grid.grid-1 {
+  grid-template-columns: 1fr;
+}
+.camera-grid.grid-4 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.camera-grid.grid-9 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.camera-slot {
+  min-width: 0;
+}
+.camera-picker {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  color: #7e99aa;
+  font-size: 11px;
+  margin-bottom: 9px;
+}
+.camera-picker select {
+  min-width: 0;
+  max-width: 75%;
+  padding: 6px 9px;
+  background: #17242e;
+  border: 1px solid #344c5c;
+  border-radius: 5px;
+  color: #a9c2d0;
+  font-size: 12px;
+}
+.camera-player {
+  background: #14212b;
+  border: 1px solid #35505d;
+  border-radius: 9px;
+  overflow: hidden;
+}
+.player-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 13px;
+  border-bottom: 1px solid #304653;
+  font-size: 12px;
+}
+.player-heading > a {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  font-weight: 600;
+}
+.player-heading > a svg {
+  flex-shrink: 0;
+  color: #82b9a4;
+}
+.player-heading > span {
+  white-space: nowrap;
+  font-size: 10px;
+}
+.player-online {
+  color: #72d6af;
+}
+.player-offline {
+  color: #8797a4;
+}
+.player-frame {
+  position: relative;
+  aspect-ratio: 16/9;
+  background: #0b141b;
+  overflow: hidden;
+  isolation: isolate;
+}
+.player-frame > video,
+.player-frame > img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.player-frame .media-hidden {
+  opacity: 0;
+}
+.camera-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.player-badges {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+  max-width: 85%;
+  pointer-events: none;
+}
+.player-demo,
+.player-ai-offline {
+  padding: 4px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  background: #273d30e8;
+  color: #9ee1bd;
+  border: 1px solid #557d63;
+}
+.player-ai-offline {
+  background: #492c26df;
+  color: #f0b389;
+  border-color: #89583b;
+}
+.player-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 13px;
+  color: #6f8e9f;
+  font-size: 10px;
+  gap: 10px;
+}
+.no-signal {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #7996a7;
+  text-align: center;
+  padding: 20px;
+}
+.no-signal strong {
+  color: #a6bdcb;
+  font-size: 16px;
+}
+.no-signal small {
+  font-size: 11px;
+}
+.retry-stream {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  background: #1a2d37cc !important;
+  color: #a3c7b4 !important;
+  border: 1px solid #3b6352 !important;
+  border-radius: 6px;
+}
+.webcam-action {
+  position: absolute;
+  left: 10%;
+  right: 10%;
+  bottom: 12%;
+  text-align: center;
+}
+.webcam-action p {
+  margin-top: 12px;
+  color: #ffb2b9;
+  font-size: 12px;
+}
+.rtsp-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #14232cee;
+  padding: 10px 12px;
+  font-size: 11px;
+  color: #d9bd85;
+  line-height: 1.5;
+}
+.empty-camera {
+  min-height: 180px;
+  aspect-ratio: 16/9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 15px;
+  background: #17242d;
+  border: 1px dashed #35515e;
+  border-radius: 8px;
+  color: #5e7c8e;
+  font-size: 13px;
+}
+.zone-load-error {
+  font-size: 11px;
+  color: #d4ae72;
+  padding: 8px;
+}
+.live-journal {
+  padding: 20px;
+  min-width: 0;
+  max-height: calc(100vh - 220px);
+  overflow: auto;
+  position: sticky;
+  top: 20px;
+}
+.live-journal h2 {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 15px;
+}
+.live-journal .panel-heading {
+  margin-bottom: 13px;
+}
+.journal-hint {
+  color: #718d9e;
+  font-size: 11px;
+  line-height: 1.7;
+  margin-bottom: 18px;
+}
+.live-events > article {
+  padding: 17px 0;
+  border-top: 1px solid #2d4553;
+}
+.live-events > article > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 13px;
+}
+.live-events time {
+  font-size: 10px;
+  color: #68889b;
+  white-space: nowrap;
+}
+.live-events strong {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.live-events p {
+  font-size: 11px;
+  color: #839eaf;
+  line-height: 1.7;
+  margin: 8px 0 13px;
+}
+.live-events .incident-actions button {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+.grid-9 .player-heading {
+  padding: 9px;
+  font-size: 11px;
+}
+.grid-9 .player-heading > a svg {
+  display: none;
+}
+.grid-9 .player-heading > span {
+  font-size: 9px;
+}
+.grid-9 .player-footer {
+  font-size: 9px;
+  padding: 8px;
+}
+.grid-9 .camera-picker {
+  font-size: 10px;
+  gap: 5px;
+}
+.grid-9 .camera-picker select {
+  font-size: 10px;
+  max-width: 70%;
+}
+.live-demo-settings {
+  margin-bottom: 22px;
+}
+.demo-settings {
+  max-width: 680px;
+}
+.demo-settings > p {
+  font-size: 13px;
+  line-height: 1.9;
+  margin: 15px 0;
+}
+.demo-settings > label {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  margin: 20px 0;
+  font-size: 14px;
+}
+.demo-settings select {
+  background: #12232b;
+  border: 1px solid #385264;
+  border-radius: 6px;
+  padding: 9px 15px;
+  color: #c8dfd4;
+}
+.demo-settings .check-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.objects-panel {
+  margin-top: 24px;
+}
+.objects-panel table {
+  font-size: 12px;
+  min-width: 650px;
+}
+.objects-panel td,
+.objects-panel th {
+  padding: 13px 10px;
+}
+.objects-panel th {
+  text-transform: capitalize;
+  color: #8ca9b9;
+}
+.object-state {
+  font-size: 11px;
+  white-space: nowrap;
+}
+.object-ok {
+  color: #6edab2;
+}
+.object-violation {
+  color: #efae73;
+}
+.object-danger {
+  color: #ff8791;
+}
+@media (min-width: 1800px) {
+  .live-layout {
+    grid-template-columns: minmax(0, 1fr) 320px;
+  }
+  .player-heading {
+    padding: 15px;
+    font-size: 14px;
+  }
+  .player-heading > span {
+    font-size: 12px;
+  }
+  .player-footer {
+    font-size: 12px;
+  }
+  .overlay-switches label {
+    font-size: 14px;
+  }
+}
+@media (max-width: 1100px) {
+  .live-layout {
+    grid-template-columns: 1fr;
+  }
+  .live-journal {
+    position: static;
+    max-height: 500px;
+  }
+  .live-events {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 25px;
+  }
+  .grid-9 .player-heading > span {
+    display: none;
+  }
+}
+@media (max-width: 700px) {
+  .camera-grid.grid-4,
+  .camera-grid.grid-9 {
+    grid-template-columns: 1fr;
+  }
+  .live-controls {
+    padding: 15px;
+    gap: 20px;
+  }
+  .overlay-switches {
+    gap: 13px;
+  }
+  .overlay-switches label {
+    font-size: 11px;
+  }
+  .live-events {
+    grid-template-columns: 1fr;
+  }
+  .player-heading {
+    font-size: 13px;
+  }
+  .player-heading > span {
+    font-size: 11px;
+  }
+  .camera-picker span {
+    font-size: 12px;
+  }
+  .grid-9 .player-heading > span {
+    display: inline;
+  }
+  .grid-9 .player-heading > a svg {
+    display: block;
+  }
+  .grid-9 .player-heading {
+    font-size: 13px;
+  }
+  .grid-9 .camera-picker select {
+    font-size: 12px;
+  }
+  .live-journal {
+    max-height: 550px;
+  }
+  .player-frame .webcam-action button {
+    font-size: 12px;
+  }
+  .demo-settings > label {
+    font-size: 13px;
+  }
+}

@@ -3,6 +3,20 @@
 Updated after every phase and at least every 30 minutes (integration spec 3). On restart read this
 file, DECISIONS.md, CHECKLIST.md and INTEGRATION_INVENTORY.md and continue from the first unfinished item.
 
+## Status — 2026-11-04 23:20 (UTC+5) — Phase B done, 8.1–8.2 green, Phase C/D/E in progress
+
+### Done since 20:35
+- Phase B website: b2a1994 (frontend), 2fbd88e (backend), 680c63b (oversized snapshot → 422 with field errors).
+- Phase B AI: 1f0f9ae (logic core, fakes), 5a4eca1 (contract conformance: schemas, clients, spool, config sync, strict mock on 8010), 5a8e336 (`safety-ai run`: supervisor, workers, sinks, demo, selftest, CLI), bd23ac1 (README, D-038..D-043, lap dependency). AI-side evidence: 2850 unit/property tests and the e2e run green (`reports/inventory/ai_messages_after.md`).
+- 8.1 contract tests: 5 passed. 8.2 flow tests: 16/16 passed (`reports/runtime/flows_run1.log`: 13 passed, 3 failed on test defects; fixed in f54a30e — zones with incident history are disabled instead of deleted, and the detections test waits for `ok` after the violation; `reports/runtime/flows_run2.log`: the 3 passed).
+
+### In progress
+- Phase C wiring checks, 8.3 real-model smoke with screenshots, 8.4 performance budget, `scripts/verify_run.py` (CPU only: the GPU is busy with the Construction-PPE training chain of safety-ai, see safety-ai/docs/TRAINING_SPEC.md).
+- Phase E root documentation (README, docs/INTEGRATION.md, TROUBLESHOOTING.md, DEMO_SCRIPT.md) and the inventory's commit column.
+
+### Next
+- Verification Protocol (10.2) ×3 after the training work in safety-ai is committed (both tasks change safety-ai; the passes must see the final tree).
+
 ## Status — 2026-11-04 20:35 (UTC+5) — Phase A done, Phase B (fixing) starting
 
 ### Done

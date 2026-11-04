@@ -1,0 +1,34 @@
+{
+  "method": "present",
+  "source_root": "C:/Users/arkhi/Downloads/ocherednoiAIdlyahackathona/safety-ai/data/construction-ppe",
+  "real_data": true,
+  "attempts": [
+    {
+      "step": "present",
+      "attempt": 1,
+      "ok": true,
+      "detail": "data.yaml names and per-split counts match the release",
+      "seconds": 0.0
+    }
+  ],
+  "archive": {
+    "path": "data/raw/cppe_t1/construction-ppe.zip",
+    "bytes": 647666037,
+    "sha256": "e5817aa9c73f33e525d76ca6bc6af4e4eac9dcea9bcfef1cfd1a71c09fbc1232",
+    "check": "647666037 bytes, 2004 members, all CRCs ok"
+  },
+  "settings": {
+    "datasets_dir": "C:\\Users\\arkhi\\Downloads\\ocherednoiAIdlyahackathona\\safety-ai\\data",
+    "runs_dir": "C:\\Users\\arkhi\\Downloads\\ocherednoiAIdlyahackathona\\safety-ai\\runs",
+    "sync": false,
+    "wandb": false,
+    "comet": false,
+    "mlflow": false,
+    "clearml": false
+  },
+  "skipped_settings": [
+    "hub"
+  ],
+  "blocker": null,
+  "finished_at": "2026-11-04T17:51:19Z"
+}

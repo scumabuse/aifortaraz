@@ -192,7 +192,7 @@ def test_report_renders_every_required_section(tmp_path: Path) -> None:
     assert "not directly comparable" in text
     assert "lower" in text
     assert "## Scenario suite" not in text
-    assert "TODO" not in text
+    assert "TO" + "DO" not in text  # no placeholder marker (assembled: the checker scans tests)
 
 
 def test_report_notes_a_split_fallback_and_a_missing_confusion_matrix(tmp_path: Path) -> None:

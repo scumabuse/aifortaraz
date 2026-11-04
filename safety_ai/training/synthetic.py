@@ -18,6 +18,7 @@ YAML file itself and the dataset can be moved or copied freely.
 from __future__ import annotations
 
 import colorsys
+import math
 import shutil
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
@@ -58,6 +59,7 @@ _PLACEMENT_ATTEMPTS: Final[int] = 60
 _MARGIN_PX: Final[int] = 2
 _MIN_BOX_FRACTION: Final[float] = 0.10
 _MAX_BOX_FRACTION: Final[float] = 0.32
+_DEFAULT_RATIOS: Final[tuple[float, ...]] = (0.8, 0.1, 0.1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,17 +100,18 @@ class SyntheticObject:
         )
 
 
-def class_styles() -> tuple[ClassStyle, ...]:
-    """Return the drawing style of every taxonomy class, in class-id order.
+def class_styles(names: Sequence[str] = TAXONOMY) -> tuple[ClassStyle, ...]:
+    """Return the drawing style of every class of ``names`` (default: the taxonomy), in id order.
 
     Shapes cycle rectangle, ellipse, triangle; hues are spread evenly over the colour wheel in a
     permuted order (so neighbouring class ids get distant hues) with two brightness levels, which
     makes every class distinguishable by colour alone and every (shape, colour) pair unique.
     """
-    count = len(TAXONOMY)
+    count = len(names)
+    step = next(s for s in (7, 5, 11, 13, 1) if math.gcd(s, count) == 1)
     styles: list[ClassStyle] = []
-    for class_id, name in enumerate(TAXONOMY):
-        hue_slot = (class_id * 7) % count
+    for class_id, name in enumerate(names):
+        hue_slot = (class_id * step) % count
         value = 1.0 if class_id % 2 == 0 else 0.62
         red, green, blue = colorsys.hsv_to_rgb(hue_slot / count, 0.9, value)
         bgr = (round(blue * 255), round(green * 255), round(red * 255))
@@ -116,36 +119,46 @@ def class_styles() -> tuple[ClassStyle, ...]:
     return tuple(styles)
 
 
-def split_counts(n_images: int) -> tuple[int, int, int]:
-    """Return the ``(train, val, test)`` image counts of an 80/10/10 split of ``n_images``."""
+def split_counts(n_images: int, ratios: Sequence[float] | None = None) -> tuple[int, ...]:
+    """Return the image count of every split; default ``(train, val, test)`` of 80/10/10.
+
+    With ``ratios`` (one positive share per split, train first) every split after the first gets
+    ``max(1, round(n_images * share))`` images and the first split keeps the rest.
+    """
     if n_images < _MIN_IMAGES:
         raise ValueError(f"n_images must be at least {_MIN_IMAGES}, got {n_images}")
-    n_val = max(1, round(n_images * 0.1))
-    n_test = max(1, round(n_images * 0.1))
-    return n_images - n_val - n_test, n_val, n_test
+    shares = tuple(ratios) if ratios is not None else _DEFAULT_RATIOS
+    if len(shares) < 2 or any(share <= 0 for share in shares):
+        raise ValueError(f"ratios must be at least two positive shares, got {shares}")
+    others = [max(1, round(n_images * share)) for share in shares[1:]]
+    if n_images - sum(others) < 1:
+        raise ValueError(f"{n_images} images cannot be split by {shares}")
+    return (n_images - sum(others), *others)
 
 
-def _split_names(n_images: int, rng: np.random.Generator) -> list[str]:
+def _split_names(
+    n_images: int,
+    rng: np.random.Generator,
+    splits: Sequence[str] = SPLITS,
+    ratios: Sequence[float] | None = None,
+) -> list[str]:
     """Assign every image index to a split with a seeded permutation."""
-    n_train, n_val, _ = split_counts(n_images)
+    bounds = np.cumsum(split_counts(n_images, ratios)).tolist()
     order = rng.permutation(n_images)
-    names = ["test"] * n_images
+    names = [splits[-1]] * n_images
     for rank, index in enumerate(order.tolist()):
-        if rank < n_train:
-            names[index] = "train"
-        elif rank < n_train + n_val:
-            names[index] = "val"
+        names[index] = splits[next(i for i, bound in enumerate(bounds) if rank < bound)]
     return names
 
 
-def _class_cycle(rng: np.random.Generator) -> Iterator[int]:
-    """Yield class ids forever as consecutive shuffled permutations of all classes.
+def _class_cycle(rng: np.random.Generator, count: int = len(TAXONOMY)) -> Iterator[int]:
+    """Yield class ids forever as consecutive shuffled permutations of ``count`` classes.
 
-    Every block of ``len(TAXONOMY)`` objects therefore contains each class exactly once, so each
-    split with at least that many objects represents every class.
+    Every block of ``count`` objects therefore contains each class exactly once, so each split
+    with at least that many objects represents every class.
     """
     while True:
-        yield from (int(c) for c in rng.permutation(len(TAXONOMY)))
+        yield from (int(c) for c in rng.permutation(count))
 
 
 def _background(rng: np.random.Generator, width: int, height: int) -> ImageArray:
@@ -227,19 +240,34 @@ def render_image(
     return image, tuple(placed)
 
 
-def _data_yaml_text(seed: int, n_images: int, image_size: tuple[int, int]) -> str:
+def _data_yaml_text(
+    seed: int,
+    n_images: int,
+    image_size: tuple[int, int],
+    *,
+    names: Sequence[str] = TAXONOMY,
+    splits: Sequence[str] = SPLITS,
+    ratios: Sequence[float] | None = None,
+) -> str:
     """Return the data.yaml text (no ``path`` key: splits resolve relative to the file)."""
     width, height = image_size
+    if tuple(names) == TAXONOMY and tuple(splits) == SPLITS and ratios is None:
+        split_text = "split 80/10/10;"
+        class_text = (
+            "# classes = the unified taxonomy (datasets/taxonomy.yaml), one shape/colour per class."
+        )
+    else:
+        shares = "/".join(str(round(r * 100)) for r in (ratios or _DEFAULT_RATIOS))
+        split_text = f"split {'/'.join(splits)} {shares};"
+        class_text = f"# {len(names)} caller-supplied classes, one shape/colour per class."
     lines = [
         MARKER,
-        f"# seed {seed}, {n_images} images of {width}x{height} px, split 80/10/10;",
-        "# classes = the unified taxonomy (datasets/taxonomy.yaml), one shape/colour per class.",
-        "train: images/train",
-        "val: images/val",
-        "test: images/test",
-        f"nc: {len(TAXONOMY)}",
+        f"# seed {seed}, {n_images} images of {width}x{height} px, {split_text}",
+        class_text,
+        *(f"{split}: images/{split}" for split in splits),
+        f"nc: {len(names)}",
         "names:",
-        *(f"  {class_id}: {name}" for class_id, name in enumerate(TAXONOMY)),
+        *(f"  {class_id}: {name}" for class_id, name in enumerate(names)),
     ]
     return "\n".join(lines) + "\n"
 
@@ -282,6 +310,10 @@ def generate_synthetic_dataset(
     n_images: int = 200,
     seed: int = 0,
     image_size: tuple[int, int] = (320, 240),
+    *,
+    names: Sequence[str] = TAXONOMY,
+    splits: Sequence[str] = SPLITS,
+    ratios: Sequence[float] | None = None,
 ) -> Path:
     """Generate the synthetic YOLO dataset and return the path of its ``data.yaml``.
 
@@ -292,28 +324,39 @@ def generate_synthetic_dataset(
         n_images: Total number of images (at least 10), split 80/10/10 into train/val/test.
         seed: Seed of the generator; identical arguments give byte-identical files.
         image_size: ``(width, height)`` of every image in pixels (each side at least 64).
+        names: Class names in id order (default: the unified taxonomy).
+        splits: Split names, train first (default ``train, val, test``).
+        ratios: Share of each split (default 0.8/0.1/0.1); one value per split.
 
     Returns:
-        The path of the written ``data.yaml`` (``names`` = the unified taxonomy).
+        The path of the written ``data.yaml``.
     """
     width, height = image_size
     if width < _MIN_SIDE_PX or height < _MIN_SIDE_PX:
         raise ValueError(f"image_size sides must be at least {_MIN_SIDE_PX} px, got {image_size}")
-    split_counts(n_images)
+    if len(set(splits)) != len(splits) or not splits:
+        raise ValueError(f"splits must be distinct names, got {list(splits)}")
+    if ratios is not None and len(ratios) != len(splits):
+        raise ValueError(f"need one ratio per split ({len(splits)}), got {list(ratios)}")
+    if not names:
+        raise ValueError("names must not be empty")
+    split_counts(n_images, ratios if ratios is not None else _default_ratios(splits))
     out_dir = Path(out_dir)
     _prepare_out_dir(out_dir)
-    for split in SPLITS:
+    for split in splits:
         (out_dir / "images" / split).mkdir(parents=True, exist_ok=True)
         (out_dir / "labels" / split).mkdir(parents=True, exist_ok=True)
 
     rng = np.random.default_rng(seed)
-    splits = _split_names(n_images, rng)
+    shares = ratios if ratios is not None else _default_ratios(splits)
+    assigned = _split_names(n_images, rng, splits, shares)
     cycles = {
-        split: _class_cycle(np.random.default_rng([seed, i])) for i, split in enumerate(SPLITS)
+        split: _class_cycle(np.random.default_rng([seed, i]), len(names))
+        for i, split in enumerate(splits)
     }
-    styles = class_styles()
-    pending: dict[str, list[int]] = {split: [] for split in SPLITS}
-    for index, split in enumerate(splits):
+    styles = class_styles(names)
+    pending: dict[str, list[int]] = {split: [] for split in splits}
+    for index, split in enumerate(assigned):
         wanted = int(rng.integers(_MIN_OBJECTS, _MAX_OBJECTS + 1))
         queue = pending[split]
         while len(queue) < wanted:
@@ -328,5 +371,14 @@ def generate_synthetic_dataset(
         (out_dir / "labels" / split / f"{stem}.txt").write_bytes(label_text.encode("ascii"))
 
     yaml_path = out_dir / "data.yaml"
-    yaml_path.write_bytes(_data_yaml_text(seed, n_images, image_size).encode("utf-8"))
+    text = _data_yaml_text(seed, n_images, image_size, names=names, splits=splits, ratios=ratios)
+    yaml_path.write_bytes(text.encode("utf-8"))
     return yaml_path
+
+
+def _default_ratios(splits: Sequence[str]) -> tuple[float, ...] | None:
+    """None (80/10/10) for three splits, an even split of the non-train share otherwise."""
+    if len(splits) == len(_DEFAULT_RATIOS):
+        return None
+    rest = 0.2 / (len(splits) - 1) if len(splits) > 1 else 0.0
+    return (1.0 - rest * (len(splits) - 1), *([rest] * (len(splits) - 1)))

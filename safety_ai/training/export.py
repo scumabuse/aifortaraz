@@ -481,7 +481,12 @@ def export(
             clock=clock,
         )
         registry.add_export(
-            entry.name, fmt, artifact.path, created_at=clock.now_utc(), sha256=artifact.sha256
+            entry.name,
+            fmt,
+            artifact.path,
+            created_at=clock.now_utc(),
+            sha256=artifact.sha256,
+            imgsz=artifact.imgsz,
         )
         artifacts.append(artifact)
     return ExportResult(entry.name, weights, tuple(artifacts), tuple(skipped))

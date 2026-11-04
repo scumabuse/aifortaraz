@@ -26,15 +26,17 @@ The registry entry of an evaluated registry model gets these measured values as 
 
 from __future__ import annotations
 
+import json
 import platform
 import shutil
 import statistics
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Final, Protocol, cast
 
 import torch
+from PIL import Image
 from ultralytics import YOLO
 
 from safety_ai.clock import Clock, SystemClock, format_utc_seconds
@@ -45,6 +47,7 @@ from safety_ai.inference.registry import (
     atomic_write_text,
     class_names,
 )
+from safety_ai.inference.types import TAXONOMY
 from safety_ai.training.export import Box, match_boxes, result_boxes
 from safety_ai.training.train import (
     DEFAULT_DATA_YAML,
@@ -695,3 +698,566 @@ def evaluate(
         updated = {**entry.model_dump(), "metrics": _registry_metrics(report, registry)}
         registry.add(RegistryEntry.model_validate(updated))
     return report
+
+
+# ============================================================================================
+# Construction-PPE evaluation (docs/TRAINING_SPEC.md 7.1; reports under reports/eval/<model>/)
+# ============================================================================================
+
+CPPE_EVAL_CONF: Final[float] = 0.001
+CPPE_EVAL_IOU: Final[float] = 0.6
+CPPE_EVAL_IMGSZ: Final[int] = 640
+BARE_GROUP: Final[tuple[str, ...]] = ("head", "face", "hands", "foot")
+"""Bare body parts: their recall is what makes "PPE missing" detectable (spec 7.1 a)."""
+WORN_BARE_PAIRS: Final[tuple[tuple[str, str], ...]] = (
+    ("helmet", "head"),
+    ("glasses", "face"),
+    ("gloves", "hands"),
+    ("boots", "foot"),
+)
+"""Pairwise confusions reported from the confusion matrix (spec 7.1 b), taxonomy names."""
+SPEC_SMALL_CLASSES: Final[tuple[str, ...]] = ("gloves", "glasses", "boots")
+"""The small-object classes named by spec 7.1 c."""
+MEASURED_SMALL_CLASSES: Final[tuple[str, ...]] = ("helmet", "head", "face", "hands")
+"""Median box side < 32 px at the 640 letterbox in the release (reports/data_stats.md)."""
+VAL_PLOTS: Final[tuple[str, ...]] = (
+    "confusion_matrix.png",
+    "confusion_matrix_normalized.png",
+    "BoxPR_curve.png",
+    "BoxF1_curve.png",
+    "BoxP_curve.png",
+    "BoxR_curve.png",
+)
+_SMALL_SIDE_PX: Final[float] = 32.0
+_SPEED_WARMUP: Final[int] = 3
+
+
+@dataclass(frozen=True, slots=True)
+class CppeClassMetrics:
+    """Per-class validation numbers (precision/recall at Ultralytics' max-F1 confidence)."""
+
+    index: int
+    name: str
+    """Model class name."""
+    taxonomy: str | None
+    """Runtime taxonomy name (None: not used by the runtime, e.g. no_vest)."""
+    images: int
+    instances: int
+    precision: float | None
+    recall: float | None
+    map50: float | None
+    map50_95: float | None
+    mean_side_640: float | None
+    """Mean sqrt(box area) of the split's labels after the 640-px letterbox."""
+    small_share: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class PairConfusion:
+    """How often a worn item and its bare body part are mistaken for each other."""
+
+    worn: str
+    bare: str
+    worn_instances: int
+    bare_instances: int
+    worn_correct: int
+    bare_correct: int
+    worn_as_bare: int
+    bare_as_worn: int
+    worn_missed: int
+    bare_missed: int
+
+
+@dataclass(frozen=True, slots=True)
+class CppeEvalReport:
+    """Everything :func:`evaluate_cppe` measured (``metrics.json`` holds the same numbers)."""
+
+    model_name: str
+    weights: Path
+    data_yaml: Path
+    split: str
+    device: str
+    imgsz: int
+    conf: float
+    iou: float
+    overall: Mapping[str, float]
+    classes: tuple[CppeClassMetrics, ...]
+    bare_group: Mapping[str, Any]
+    pairs: tuple[PairConfusion, ...]
+    speed: Mapping[str, float]
+    confusion_conf: float
+    report_dir: Path
+    evaluated_at: str
+    command: str
+    plots: tuple[str, ...]
+    dedup: Mapping[str, float] | None = None
+    notes: tuple[str, ...] = ()
+
+    def by_taxonomy(self, name: str) -> CppeClassMetrics | None:
+        """The class whose taxonomy name is ``name``."""
+        return next((c for c in self.classes if c.taxonomy == name), None)
+
+    def to_json(self) -> dict[str, Any]:
+        """JSON-serializable numbers."""
+        return {
+            "model": self.model_name,
+            "weights": display_path(self.weights),
+            "data": display_path(self.data_yaml),
+            "split": self.split,
+            "device": self.device,
+            "imgsz": self.imgsz,
+            "conf": self.conf,
+            "iou": self.iou,
+            "overall": dict(self.overall),
+            "classes": [
+                {
+                    "index": c.index,
+                    "name": c.name,
+                    "taxonomy": c.taxonomy,
+                    "images": c.images,
+                    "instances": c.instances,
+                    "precision": c.precision,
+                    "recall": c.recall,
+                    "mAP50": c.map50,
+                    "mAP50-95": c.map50_95,
+                    "mean_side_640": c.mean_side_640,
+                    "small_share": c.small_share,
+                }
+                for c in self.classes
+            ],
+            "bare_group": dict(self.bare_group),
+            "pairs": [_pair_json(p) for p in self.pairs],
+            "speed_ms_per_image": dict(self.speed),
+            "confusion_matrix_conf": self.confusion_conf,
+            "dedup": dict(self.dedup) if self.dedup else None,
+            "evaluated_at": self.evaluated_at,
+            "command": self.command,
+            "plots": list(self.plots),
+            "notes": list(self.notes),
+        }
+
+
+def _pair_json(pair: PairConfusion) -> dict[str, Any]:
+    return {field.name: getattr(pair, field.name) for field in fields(pair)}
+
+
+def model_taxonomy(
+    weights: Path, names: Sequence[str], entry: RegistryEntry | None
+) -> list[str | None]:
+    """Model class index -> taxonomy name: the registry entry, else ``<stem>_class_map.json``
+    next to the weights, else the names themselves when they are taxonomy names."""
+    if entry is not None and len(entry.classes) == len(names):
+        return list(entry.classes)
+    class_map = Path(weights).with_name(f"{Path(weights).stem}_class_map.json")
+    if class_map.is_file():
+        mapping = json.loads(class_map.read_text(encoding="utf-8"))
+        return [mapping.get(n) for n in names]
+    return [n if n in TAXONOMY else None for n in names]
+
+
+def label_sizes(images: Sequence[Path], nc: int) -> dict[int, list[float]]:
+    """Per class: sqrt(box area) in pixels after the 640-px letterbox, for every label."""
+    sides: dict[int, list[float]] = {i: [] for i in range(nc)}
+    for image in images:
+        boxes = read_label_boxes(label_path(image))
+        if not boxes:
+            continue
+        with Image.open(image) as handle:
+            width, height = handle.size
+        scale = CPPE_EVAL_IMGSZ / max(width, height, 1)
+        for box in boxes:
+            if 0 <= box.cls < nc:
+                w_px = (box.x2 - box.x1) * width * scale
+                h_px = (box.y2 - box.y1) * height * scale
+                sides[box.cls].append(max(w_px * h_px, 0.0) ** 0.5)
+    return sides
+
+
+def pair_confusions(
+    matrix: Sequence[Sequence[float]], taxonomy: Sequence[str | None]
+) -> list[PairConfusion]:
+    """Worn/bare confusions from an Ultralytics confusion matrix (rows predicted, columns true,
+    the last row/column is background)."""
+    nc = len(taxonomy)
+    index = {name: i for i, name in enumerate(taxonomy) if name is not None}
+
+    def cell(pred: int, true: int) -> int:
+        return round(float(matrix[pred][true]))
+
+    def column(true: int) -> int:
+        return round(sum(float(matrix[p][true]) for p in range(nc + 1)))
+
+    out: list[PairConfusion] = []
+    for worn, bare in WORN_BARE_PAIRS:
+        if worn not in index or bare not in index:
+            continue
+        w, b = index[worn], index[bare]
+        out.append(
+            PairConfusion(
+                worn=worn,
+                bare=bare,
+                worn_instances=column(w),
+                bare_instances=column(b),
+                worn_correct=cell(w, w),
+                bare_correct=cell(b, b),
+                worn_as_bare=cell(b, w),
+                bare_as_worn=cell(w, b),
+                worn_missed=cell(nc, w),
+                bare_missed=cell(nc, b),
+            )
+        )
+    return out
+
+
+def _per_class(metrics: Any, nc: int) -> dict[int, tuple[float, float, float, float]]:
+    """class id -> (precision, recall, AP50, AP50-95) for the classes Ultralytics scored."""
+    box = metrics.box
+    out: dict[int, tuple[float, float, float, float]] = {}
+    for i, cls in enumerate(list(box.ap_class_index)):
+        if 0 <= int(cls) < nc:
+            out[int(cls)] = (float(box.p[i]), float(box.r[i]), float(box.ap50[i]), float(box.ap[i]))
+    return out
+
+
+def _counts(metrics: Any, name: str, nc: int) -> list[int]:
+    value = getattr(metrics, name, None)
+    if value is None:
+        return [0] * nc
+    return ([int(v) for v in value] + [0] * nc)[:nc]
+
+
+def _batch1_speed(
+    model: EvalModel, images: Sequence[Path], *, imgsz: int, device: str, count: int
+) -> dict[str, float]:
+    """Median per-image times of ``count`` batch-1 predictions (after a short warm-up)."""
+    chosen = list(images)[: count + _SPEED_WARMUP]
+    inference: list[float] = []
+    total: list[float] = []
+    for i, image in enumerate(chosen):
+        results = model.predict(str(image), imgsz=imgsz, device=device, verbose=False, conf=0.25)
+        speed = getattr(results[0], "speed", None) if results else None
+        if i < _SPEED_WARMUP or not isinstance(speed, Mapping):
+            continue
+        inference.append(float(speed.get("inference", 0.0)))
+        total.append(
+            sum(float(speed.get(k, 0.0)) for k in ("preprocess", "inference", "postprocess"))
+        )
+    return {
+        "batch1_inference_ms": statistics.median(inference) if inference else 0.0,
+        "batch1_total_ms": statistics.median(total) if total else 0.0,
+        "batch1_images": float(len(inference)),
+    }
+
+
+def evaluate_cppe(
+    model: str | Path,
+    data_yaml: Path,
+    *,
+    split: str = "val",
+    imgsz: int = CPPE_EVAL_IMGSZ,
+    device: str = "auto",
+    conf: float = CPPE_EVAL_CONF,
+    iou: float = CPPE_EVAL_IOU,
+    registry: ModelRegistry | None = None,
+    reports_root: Path = Path("reports/eval"),
+    runs_dir: Path = Path("runs"),
+    speed_images: int = 50,
+    model_factory: Callable[[str], EvalModel] | None = None,
+    clock: Clock | None = None,
+    command: str = "",
+    notes: Sequence[str] = (),
+) -> CppeEvalReport:
+    """Evaluate a Construction-PPE model on one split and write ``reports/eval/<model>/``.
+
+    ``model.val(data, split, imgsz=640, conf=0.001, iou=0.6, plots=True)`` gives mAP50, mAP50-95,
+    precision and recall overall and per class, the confusion matrix and the PR/F1/P/R curves
+    (copied into the report folder); on top of that: the bare-class group (head, face, hands,
+    foot), the worn/bare pairwise confusions, the small-object classes with their mean label
+    size at 640, and the speed on the device (Ultralytics' batched val timing plus the median of
+    batch-1 predictions). When the dataset has a deduplicated val list next to its YAML
+    (``data_val_dedup.yaml``), the overall numbers are also computed on it.
+
+    Writes ``report.md`` and ``metrics.json``; the registry is not modified (its metrics are the
+    training's final validation).
+    """
+    registry = registry or ModelRegistry()
+    clock = clock or SystemClock()
+    factory = model_factory or _load_eval_model
+    name, weights, entry = _resolve_model(model, registry)
+    spec = load_dataset_spec(data_yaml)
+    if split not in spec.splits:
+        raise ValueError(f"{data_yaml} has no {split!r} split")
+    run_device = resolve_device(device)
+    yolo = factory(str(weights))
+    names = tuple(class_names(yolo.names))
+    if names != spec.names:
+        raise ValueError(
+            f"model classes {list(names)} differ from the dataset's {list(spec.names)}"
+        )
+    taxonomy = model_taxonomy(weights, names, entry)
+    report_dir = Path(reports_root) / name
+    val_dir = Path(runs_dir).resolve() / "eval" / f"{name}_{split}_{imgsz}"
+    metrics = yolo.val(
+        data=str(spec.yaml_path),
+        split=split,
+        imgsz=imgsz,
+        conf=conf,
+        iou=iou,
+        device=ultralytics_device(run_device),
+        plots=True,
+        project=str(val_dir.parent),
+        name=val_dir.name,
+        exist_ok=True,
+        verbose=False,
+    )
+    nc = len(names)
+    per_class = _per_class(metrics, nc)
+    instances = _counts(metrics, "nt_per_class", nc)
+    images_with = _counts(metrics, "nt_per_image", nc)
+    split_images = list_images(spec.sources(split), unique=True)
+    sides = label_sizes(split_images, nc)
+    classes = tuple(
+        CppeClassMetrics(
+            index=i,
+            name=names[i],
+            taxonomy=taxonomy[i],
+            images=images_with[i],
+            instances=instances[i],
+            precision=per_class[i][0] if i in per_class else None,
+            recall=per_class[i][1] if i in per_class else None,
+            map50=per_class[i][2] if i in per_class else None,
+            map50_95=per_class[i][3] if i in per_class else None,
+            mean_side_640=statistics.fmean(sides[i]) if sides[i] else None,
+            small_share=(
+                sum(1 for s in sides[i] if s < _SMALL_SIDE_PX) / len(sides[i]) if sides[i] else None
+            ),
+        )
+        for i in range(nc)
+    )
+    bare = [c for c in classes if c.taxonomy in BARE_GROUP and c.map50 is not None]
+    bare_group: dict[str, Any] = {
+        "classes": [c.taxonomy for c in bare],
+        "instances": sum(c.instances for c in bare),
+        "mAP50": statistics.fmean(c.map50 or 0.0 for c in bare) if bare else None,
+        "mAP50-95": statistics.fmean(c.map50_95 or 0.0 for c in bare) if bare else None,
+        "precision": statistics.fmean(c.precision or 0.0 for c in bare) if bare else None,
+        "recall": statistics.fmean(c.recall or 0.0 for c in bare) if bare else None,
+        "min_AP50": min((c.map50 or 0.0) for c in bare) if bare else None,
+    }
+    matrix_obj = getattr(metrics, "confusion_matrix", None)
+    matrix = getattr(matrix_obj, "matrix", None)
+    pairs = tuple(pair_confusions(matrix.tolist(), taxonomy)) if matrix is not None else ()
+    speed_info = getattr(metrics, "speed", None) or {}
+    speed: dict[str, float] = {
+        f"val_{k}_ms": float(v) for k, v in speed_info.items() if isinstance(v, (int, float))
+    }
+    speed.update(
+        _batch1_speed(
+            yolo,
+            split_images,
+            imgsz=imgsz,
+            device=ultralytics_device(run_device),
+            count=speed_images,
+        )
+    )
+    report_dir.mkdir(parents=True, exist_ok=True)
+    plots: list[str] = []
+    for file_name in VAL_PLOTS:
+        source = val_dir / file_name
+        if source.is_file():
+            shutil.copyfile(source, report_dir / file_name)
+            plots.append(file_name)
+    dedup_yaml = spec.yaml_path.with_name("data_val_dedup.yaml")
+    dedup: dict[str, float] | None = None
+    if split == "val" and dedup_yaml.is_file():
+        dedup_metrics = yolo.val(
+            data=str(dedup_yaml),
+            split="val",
+            imgsz=imgsz,
+            conf=conf,
+            iou=iou,
+            device=ultralytics_device(run_device),
+            plots=False,
+            project=str(val_dir.parent),
+            name=f"{val_dir.name}_dedup",
+            exist_ok=True,
+            verbose=False,
+        )
+        dedup = {
+            "mAP50": float(dedup_metrics.box.map50),
+            "mAP50-95": float(dedup_metrics.box.map),
+            "precision": float(dedup_metrics.box.mp),
+            "recall": float(dedup_metrics.box.mr),
+        }
+    report = CppeEvalReport(
+        model_name=name,
+        weights=weights,
+        data_yaml=spec.yaml_path,
+        split=split,
+        device=describe_device(run_device),
+        imgsz=imgsz,
+        conf=conf,
+        iou=iou,
+        overall={
+            "mAP50": float(metrics.box.map50),
+            "mAP50-95": float(metrics.box.map),
+            "precision": float(metrics.box.mp),
+            "recall": float(metrics.box.mr),
+            "images": float(len(split_images)),
+            "instances": float(sum(instances)),
+        },
+        classes=classes,
+        bare_group=bare_group,
+        pairs=pairs,
+        speed=speed,
+        confusion_conf=0.25,
+        report_dir=report_dir,
+        evaluated_at=format_utc_seconds(clock.now_utc()),
+        command=command,
+        plots=tuple(plots),
+        dedup=dedup,
+        notes=tuple(notes),
+    )
+    atomic_write_text(
+        report_dir / "metrics.json",
+        json.dumps(report.to_json(), indent=2, ensure_ascii=False) + "\n",
+    )
+    atomic_write_text(report_dir / "report.md", render_cppe_eval_report(report))
+    return report
+
+
+def _cell3(value: float | None) -> str:
+    return f"{value:.3f}" if value is not None else "-"
+
+
+def render_cppe_eval_report(report: CppeEvalReport) -> str:
+    """Markdown of ``reports/eval/<model>/report.md`` (pure)."""
+    overall = report.overall
+    speed = report.speed
+    lines = [
+        f"# Evaluation - {report.model_name} ({report.split} split)",
+        "",
+        "| item | value |",
+        "|---|---|",
+        f"| evaluated (UTC) | {report.evaluated_at} |",
+        f"| weights | `{display_path(report.weights)}` |",
+        f"| dataset | `{display_path(report.data_yaml)}`, split {report.split} "
+        f"({int(overall['images'])} images, {int(overall['instances'])} instances) |",
+        f"| settings | imgsz {report.imgsz}, conf {report.conf}, NMS IoU {report.iou} (spec 7.1) |",
+        f"| device | {report.device} |",
+        *([f"| command | `{report.command}` |"] if report.command else []),
+        "",
+        *[f"> {note}" for note in report.notes],
+        *([""] if report.notes else []),
+        "## Overall",
+        "",
+        "| mAP50 | mAP50-95 | precision | recall |",
+        "|---|---|---|---|",
+        f"| {overall['mAP50']:.4f} | {overall['mAP50-95']:.4f} | {overall['precision']:.4f} "
+        f"| {overall['recall']:.4f} |",
+        "",
+        "Precision and recall are Ultralytics' values at the single confidence that maximizes "
+        "the mean F1 over the classes.",
+        "",
+    ]
+    if report.dedup:
+        d = report.dedup
+        lines += [
+            "Deduplicated val (val images near-duplicating a train image excluded): "
+            f"mAP50 {d['mAP50']:.4f}, mAP50-95 {d['mAP50-95']:.4f}.",
+            "",
+        ]
+    lines += [
+        "## Per class",
+        "",
+        "| class | taxonomy | images | instances | precision | recall | mAP50 | mAP50-95 "
+        "| mean side at 640 (px) | small share |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+        *(
+            f"| {c.name} | {c.taxonomy or '(not used)'} | {c.images} | {c.instances} "
+            f"| {_cell3(c.precision)} | {_cell3(c.recall)} | {_cell3(c.map50)} "
+            f"| {_cell3(c.map50_95)} | "
+            + (f"{c.mean_side_640:.1f}" if c.mean_side_640 is not None else "-")
+            + " | "
+            + (f"{c.small_share * 100:.0f} %" if c.small_share is not None else "-")
+            + " |"
+            for c in report.classes
+        ),
+        "",
+        "## Bare-class group (head, face, hands, foot)",
+        "",
+    ]
+    group = report.bare_group
+    if group.get("classes"):
+        lines += [
+            "| classes | instances | mean AP50 | mean AP50-95 | mean precision | mean recall "
+            "| lowest AP50 |",
+            "|---|---|---|---|---|---|---|",
+            f"| {', '.join(group['classes'])} | {group['instances']} | {_cell3(group['mAP50'])} "
+            f"| {_cell3(group['mAP50-95'])} | {_cell3(group['precision'])} "
+            f"| {_cell3(group['recall'])} | {_cell3(group['min_AP50'])} |",
+            "",
+            'Their recall is what makes "PPE missing" detectable (spec 7.1 a, 7.5: every bare '
+            "class needs AP50 >= 0.3 for the production model).",
+            "",
+        ]
+    else:
+        lines += ["The model has no bare-class outputs.", ""]
+    lines += [
+        "## Worn versus bare confusions",
+        "",
+        "From Ultralytics' confusion matrix (confidence 0.25, IoU 0.45, class-agnostic matching): "
+        "per true class, how many boxes were found as the right class, as the paired class, or "
+        "not at all.",
+        "",
+        "| pair | true worn | worn found | worn -> bare | worn missed | true bare | bare found "
+        "| bare -> worn | bare missed |",
+        "|---|---|---|---|---|---|---|---|---|",
+        *(
+            f"| {p.worn} / {p.bare} | {p.worn_instances} | {p.worn_correct} | {p.worn_as_bare} "
+            f"| {p.worn_missed} | {p.bare_instances} | {p.bare_correct} | {p.bare_as_worn} "
+            f"| {p.bare_missed} |"
+            for p in report.pairs
+        ),
+        "",
+        "## Small objects",
+        "",
+        "Spec 7.1 c names gloves, glasses and boots; on this release the measured smallest "
+        "classes (median label side < 32 px at 640) are helmet, head, face and hands.",
+        "",
+        "| class | mean side at 640 (px) | small share | AP50 | AP50-95 | recall |",
+        "|---|---|---|---|---|---|",
+    ]
+    for name in (*SPEC_SMALL_CLASSES, *MEASURED_SMALL_CLASSES):
+        c = report.by_taxonomy(name)
+        if c is None:
+            continue
+        side = f"{c.mean_side_640:.1f}" if c.mean_side_640 is not None else "-"
+        share = f"{c.small_share * 100:.0f} %" if c.small_share is not None else "-"
+        lines.append(
+            f"| {c.taxonomy} ({c.name}) | {side} | {share} | {_cell3(c.map50)} "
+            f"| {_cell3(c.map50_95)} | {_cell3(c.recall)} |"
+        )
+    lines += [
+        "",
+        "## Speed",
+        "",
+        f"On {report.device} at imgsz {report.imgsz}:",
+        "",
+        "| measure | ms per image |",
+        "|---|---|",
+        *(
+            f"| {key.removesuffix('_ms').replace('_', ' ')} | {value:.2f} |"
+            for key, value in speed.items()
+            if key.endswith("_ms")
+        ),
+        "",
+        f"Batch-1 numbers are medians over {int(speed.get('batch1_images', 0))} predictions "
+        "after a warm-up of 3.",
+        "",
+        "## Plots",
+        "",
+        *(f"- [{p}]({p})" for p in report.plots),
+        "",
+    ]
+    return "\n".join(lines)

@@ -1,0 +1,241 @@
+{
+  "state": "running",
+  "runs": {
+    "r0": {
+      "name": "ppe_cppe_n_20261104_r0",
+      "state": "finished",
+      "started_at": "2026-11-04T18:00:18Z",
+      "attempts": [
+        {
+          "kind": "start",
+          "started_at": "2026-11-04T18:00:18Z",
+          "pid": 26132,
+          "seconds": 94.2,
+          "exit": 1,
+          "epochs": 1
+        },
+        {
+          "kind": "start",
+          "started_at": "2026-11-04T18:03:39Z",
+          "pid": 28112,
+          "seconds": 106.0,
+          "exit": 0,
+          "epochs": 1
+        }
+      ],
+      "time_box_s": 600.0,
+      "log": "reports/cppe/logs/r0.log",
+      "restart_pending": false,
+      "restarted_for_divergence": false,
+      "train_args": {
+        "data": "data/construction-ppe-unified/data.yaml",
+        "epochs": 1,
+        "time": 0.16666666666666666,
+        "patience": 100,
+        "batch": 8,
+        "imgsz": 320,
+        "fraction": 0.1,
+        "cache": false,
+        "seed": 0,
+        "deterministic": true,
+        "plots": true,
+        "save_period": 10,
+        "project": "C:\\Users\\arkhi\\Downloads\\ocherednoiAIdlyahackathona\\safety-ai\\runs",
+        "name": "ppe_cppe_n_20261104_r0",
+        "exist_ok": true,
+        "workers": 8,
+        "amp": true,
+        "device": "0",
+        "val": true,
+        "optimizer": "auto",
+        "cos_lr": true,
+        "warmup_epochs": 3.0,
+        "close_mosaic": 15,
+        "hsv_h": 0.015,
+        "hsv_s": 0.6,
+        "hsv_v": 0.4,
+        "degrees": 5.0,
+        "translate": 0.1,
+        "scale": 0.5,
+        "shear": 2.0,
+        "fliplr": 0.5,
+        "flipud": 0.0,
+        "mosaic": 1.0,
+        "mixup": 0.1,
+        "copy_paste": 0.0,
+        "erasing": 0.3,
+        "label_smoothing": 0.0,
+        "nbs": 64
+      },
+      "latest": {
+        "status": "final validation done",
+        "epoch": 1,
+        "epochs_planned": 1,
+        "loss_names": [
+          "box_loss",
+          "cls_loss",
+          "l1_loss"
+        ],
+        "losses": [],
+        "map50": null,
+        "map50_95": null,
+        "elapsed_attempt_s": 100.7,
+        "elapsed": "3.2 min",
+        "eta": "0.0 min",
+        "time_box_min": 10.0,
+        "setup": {
+          "optimizer": "AdamW",
+          "lr0": 0.000667,
+          "amp": false,
+          "batch": 8,
+          "start_epoch": 0,
+          "device": "cuda:0"
+        },
+        "stop_reason": "completed the 1 epochs Ultralytics planned",
+        "divergence": null
+      },
+      "time_used_s": 200.2,
+      "traceback": "reports/cppe/logs/r0_traceback_1.txt",
+      "finished_at": "2026-11-04T18:05:25Z",
+      "model": "models/ppe_cppe_n_20261104_r0.pt",
+      "sha256": "8fed9a2380cbf3d2002fdafabde13871ffd9ee99f0d30af383b62e219740cb4d",
+      "final": {
+        "mAP50": 0.07667,
+        "mAP50-95": 0.04038,
+        "precision": 0.26641,
+        "recall": 0.06551,
+        "pr_threshold": "max-F1 confidence (Ultralytics val)",
+        "split": "val",
+        "imgsz": 320,
+        "source": "measured: reports/runs/ppe_cppe_n_20261104_r0/results.csv (final validation of best.pt)"
+      },
+      "best_map50_95": 0.04038,
+      "best_map50": 0.07667,
+      "epochs_run": 1,
+      "report_dir": "reports/runs/ppe_cppe_n_20261104_r0",
+      "registered": true
+    },
+    "r1": {
+      "pid": 21744,
+      "name": "ppe_cppe_n_20261104_r1",
+      "state": "running",
+      "started_at": "2026-11-04T18:06:46Z",
+      "attempts": [
+        {
+          "kind": "start",
+          "started_at": "2026-11-04T18:06:46Z",
+          "pid": 4732,
+          "seconds": 77.7,
+          "exit": 1,
+          "epochs": 0
+        },
+        {
+          "kind": "start",
+          "started_at": "2026-11-04T18:09:17Z",
+          "pid": 27128,
+          "seconds": 5.9
+        },
+        {
+          "kind": "start",
+          "started_at": "2026-11-04T18:10:46Z",
+          "pid": 9724,
+          "seconds": null
+        }
+      ],
+      "time_box_s": 2700.0,
+      "log": "reports/cppe/logs/r1.log",
+      "restart_pending": false,
+      "restarted_for_divergence": false,
+      "train_args": {
+        "data": "datasets/construction-ppe.yaml",
+        "epochs": 60,
+        "time": 0.75,
+        "patience": 20,
+        "batch": -1,
+        "imgsz": 640,
+        "fraction": 1.0,
+        "cache": false,
+        "seed": 0,
+        "deterministic": true,
+        "plots": true,
+        "save_period": 10,
+        "project": "C:\\Users\\arkhi\\Downloads\\ocherednoiAIdlyahackathona\\safety-ai\\runs",
+        "name": "ppe_cppe_n_20261104_r1",
+        "exist_ok": true,
+        "workers": 3,
+        "amp": true,
+        "device": "0",
+        "val": true,
+        "optimizer": "auto",
+        "cos_lr": true,
+        "warmup_epochs": 3.0,
+        "close_mosaic": 15,
+        "hsv_h": 0.015,
+        "hsv_s": 0.6,
+        "hsv_v": 0.4,
+        "degrees": 5.0,
+        "translate": 0.1,
+        "scale": 0.5,
+        "shear": 2.0,
+        "fliplr": 0.5,
+        "flipud": 0.0,
+        "mosaic": 1.0,
+        "mixup": 0.1,
+        "copy_paste": 0.0,
+        "erasing": 0.3,
+        "label_smoothing": 0.0,
+        "nbs": 64
+      },
+      "latest": {
+        "status": "training",
+        "epoch": 24,
+        "epochs_planned": 60,
+        "loss_names": [
+          "box_loss",
+          "cls_loss",
+          "l1_loss"
+        ],
+        "losses": [
+          1.40571,
+          0.962,
+          0.00642
+        ],
+        "map50": 0.73655,
+        "map50_95": 0.47167,
+        "elapsed_attempt_s": 748.5,
+        "elapsed": "13.9 min",
+        "eta": "18.7 min",
+        "time_box_min": 45.0,
+        "setup": {
+          "optimizer": "AdamW",
+          "lr0": 0.000625,
+          "amp": false,
+          "batch": 8,
+          "start_epoch": 0,
+          "device": "cuda:0"
+        },
+        "stop_reason": null,
+        "divergence": null
+      },
+      "time_used_s": 77.7,
+      "traceback": "reports/cppe/logs/r1_traceback_1.txt",
+      "cuda_memory": {
+        "free_gib": 5.02,
+        "total_gib": 6.0,
+        "fraction": 0.794
+      }
+    }
+  },
+  "pid": 27548,
+  "started_at": "2026-11-04T18:10:43Z",
+  "current_run": "r1",
+  "traceback": null,
+  "log": "reports/cppe/logs/chain.log",
+  "runs_planned": [
+    "r1",
+    "r2",
+    "r3"
+  ],
+  "updated_at": "2026-11-04T18:10:43Z",
+  "waiting_for": null
+}

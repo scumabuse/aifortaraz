@@ -6,8 +6,13 @@
   by the pigeonhole principle two hashes within distance ``d`` agree exactly on at least one band,
   so only hashes sharing a band value are compared. ~17k images take seconds instead of the
   150 million comparisons of the all-pairs approach.
-* Groups are connected components (union-find) of the duplicate relation; group ids are the
-  lexicographically smallest member, so they are deterministic.
+* Removal is greedy in rank order (best first): an image is dropped when it is a near duplicate
+  of an image already kept, otherwise it is kept. No two kept images are near duplicates, and an
+  image is only dropped for a kept image within distance ``d`` of it. (Dropping whole connected
+  components instead would collapse a slowly changing video sequence, A~B~C~..., into a single
+  frame although its first and last frames are far apart.)
+* Similarity groups for the split are connected components (union-find) of a looser relation;
+  group ids are the lexicographically smallest member, so they are deterministic.
 
 The perceptual hash is computed on a grayscale image decoded at reduced size (JPEG draft mode)
 after applying the EXIF orientation; the hash of the horizontally mirrored image is kept as well
@@ -37,6 +42,7 @@ __all__ = [
     "FingerprintCache",
     "ImageFingerprint",
     "UnionFind",
+    "close_hash_pairs",
     "compute_fingerprints",
     "deduplicate",
     "fingerprint_image",
@@ -216,6 +222,29 @@ def _bands(count: int, bits: int = PHASH_BITS) -> list[tuple[int, int]]:
     return bands
 
 
+def close_hash_pairs(values: Iterable[int], *, max_distance: int) -> set[tuple[int, int]]:
+    """Return every pair ``(a, b)``, ``a < b``, of distinct hash values within ``max_distance``.
+
+    Banded search (see the module docstring): only values that agree on one of the
+    ``max_distance + 1`` bands are compared, which finds every pair by the pigeonhole principle.
+    A negative ``max_distance`` finds nothing.
+    """
+    distinct = sorted(set(values))
+    close: set[tuple[int, int]] = set()
+    if max_distance < 0:
+        return close
+    for shift, mask in _bands(max_distance + 1):
+        buckets: dict[int, list[int]] = defaultdict(list)
+        for value in distinct:
+            buckets[(value >> shift) & mask].append(value)
+        for bucket in buckets.values():
+            for index, a in enumerate(bucket):
+                for b in bucket[index + 1 :]:
+                    if (a ^ b).bit_count() <= max_distance:
+                        close.add((a, b))
+    return close
+
+
 def near_pairs(hashes: Mapping[str, int], *, max_distance: int) -> set[tuple[str, str]]:
     """Return pairs of keys whose hashes are within ``max_distance`` (each pair sorted).
 
@@ -227,18 +256,7 @@ def near_pairs(hashes: Mapping[str, int], *, max_distance: int) -> set[tuple[str
     pairs: set[tuple[str, str]] = set()
     for keys in by_hash.values():
         pairs.update((keys[0], other) for other in keys[1:])
-    distinct = sorted(by_hash)
-    close: set[tuple[int, int]] = set()
-    for shift, mask in _bands(max(1, max_distance + 1)):
-        buckets: dict[int, list[int]] = defaultdict(list)
-        for value in distinct:
-            buckets[(value >> shift) & mask].append(value)
-        for bucket in buckets.values():
-            for index, a in enumerate(bucket):
-                for b in bucket[index + 1 :]:
-                    if (a ^ b).bit_count() <= max_distance:
-                        close.add((a, b))
-    for a, b in close:
+    for a, b in close_hash_pairs(by_hash, max_distance=max_distance):
         first, second = sorted((by_hash[a][0], by_hash[b][0]))
         pairs.add((first, second))
     return pairs
@@ -263,7 +281,12 @@ def deduplicate(
     rank: Callable[[str], Any],
     max_distance: int = 4,
 ) -> DedupeResult:
-    """Remove exact duplicates, then near duplicates; keep the best-ranked key of each group.
+    """Remove exact duplicates, then near duplicates, keeping the better-ranked images.
+
+    1. Images with identical bytes: the best-ranked one survives.
+    2. The survivors are visited best first; an image within ``max_distance`` (pHash Hamming
+       distance) of an image already kept is dropped and mapped to the best-ranked such image,
+       otherwise it is kept. Hence no two kept images are near duplicates.
 
     ``rank(key)`` returns a sortable value, smaller is better (ties broken by key).
     """
@@ -276,17 +299,28 @@ def deduplicate(
         best = _best_of(members, rank)
         survivors.append(best)
         exact_dropped.update({key: best for key in members if key != best})
-    finder = UnionFind(survivors)
-    for a, b in near_pairs(
-        {key: fingerprints[key].phash for key in survivors}, max_distance=max_distance
-    ):
-        finder.union(a, b)
-    near_dropped: dict[str, str] = {}
+    hash_of = {key: fingerprints[key].phash for key in survivors}
+    neighbours: dict[int, list[int]] = defaultdict(list)
+    for a, b in close_hash_pairs(hash_of.values(), max_distance=max_distance):
+        neighbours[a].append(b)
+        neighbours[b].append(a)
+    kept_by_value: dict[int, str] = {}
+    position: dict[str, int] = {}
     keep: list[str] = []
-    for members in finder.groups().values():
-        best = _best_of(members, rank)
-        keep.append(best)
-        near_dropped.update({key: best for key in members if key != best})
+    near_dropped: dict[str, str] = {}
+    for key in sorted(survivors, key=lambda k: (rank(k), k)):
+        value = hash_of[key]
+        rivals = [
+            kept_by_value[other]
+            for other in (value, *neighbours.get(value, ()))
+            if other in kept_by_value
+        ]
+        if rivals:
+            near_dropped[key] = min(rivals, key=position.__getitem__)
+            continue
+        position[key] = len(keep)
+        keep.append(key)
+        kept_by_value[value] = key
     return DedupeResult(tuple(sorted(keep)), exact_dropped, near_dropped)
 
 

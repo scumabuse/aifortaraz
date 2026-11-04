@@ -19,7 +19,9 @@ Policy for one label file of an image that is ``width x height`` pixels (applied
 :func:`validate_dataset` re-checks the final ``data/merged`` tree: every image has a label file
 and vice versa, every line is a valid in-range box, empty label files belong to listed
 backgrounds, the images are readable, ``data.yaml`` lists the unified taxonomy and the oversampled
-train list only references train images.
+train list only references train images. Independently of the merge's own bookkeeping it also
+checks, from the hashes stored in ``index.jsonl``, that no two images are byte-identical and that
+no near-duplicate pair (pHash distance <= 4) crosses splits.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from typing import Any
 import yaml
 
 from safety_ai.training.convert import YoloBox, read_image_size, read_yolo_label_file
+from safety_ai.training.dedupe import near_pairs
 from safety_ai.training.sources.base import IMAGE_SUFFIXES
 
 __all__ = [
@@ -232,13 +235,47 @@ def _check_oversampled(merged: Path, train_files: Iterable[str], report: Validat
             report.add_error("oversampled_not_in_train", entry)
 
 
+def _check_duplicates(
+    index: Mapping[str, Mapping[str, Any]], report: ValidationReport, *, near_distance: int
+) -> None:
+    """Flag byte-identical images and near-duplicate pairs that sit in different splits."""
+    by_sha: dict[str, list[str]] = {}
+    hashes: dict[str, int] = {}
+    split_of: dict[str, str] = {}
+    for file, record in sorted(index.items()):
+        sha = str(record.get("sha256") or "")
+        if sha:
+            by_sha.setdefault(sha, []).append(file)
+        phash = record.get("phash")
+        if phash:
+            hashes[file] = int(str(phash), 16)
+            split_of[file] = str(record.get("split", ""))
+    for files in by_sha.values():
+        for duplicate in files[1:]:
+            report.add_error("exact_duplicate", f"{files[0]} == {duplicate}")
+    for a, b in sorted(near_pairs(hashes, max_distance=near_distance)):
+        if split_of[a] != split_of[b]:
+            report.add_error("near_duplicate_across_splits", f"{a} ~ {b}")
+
+
 def validate_dataset(
     merged: Path,
     taxonomy_names: Sequence[str],
     *,
     check_images: bool = True,
+    near_distance: int = 4,
 ) -> ValidationReport:
-    """Validate the merged YOLO dataset below ``merged`` (see module docstring)."""
+    """Validate the merged YOLO dataset below ``merged`` (see module docstring).
+
+    Args:
+        merged: The dataset root (``images/``, ``labels/``, ``index.jsonl``, ``data.yaml``).
+        taxonomy_names: The unified class list ``data.yaml`` must declare.
+        check_images: Also open every image header (readable, size as indexed).
+        near_distance: pHash distance up to which two images in different splits are an error.
+
+    Returns:
+        The report; ``report.ok`` is True when no error was found.
+    """
     report = ValidationReport()
     index = _load_index(merged)
     num_classes = len(taxonomy_names)
@@ -287,4 +324,5 @@ def validate_dataset(
         report.backgrounds[split] = backgrounds
     _check_yaml(merged, taxonomy_names, report)
     _check_oversampled(merged, train_files, report)
+    _check_duplicates(index, report, near_distance=near_distance)
     return report

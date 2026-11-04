@@ -40,7 +40,7 @@ Dependency-chained, ≤ 5 agents at once to stay inside the usage limit:
 ## PPE training on Construction-PPE (docs/TRAINING_SPEC.md)
 
 <!-- cppe-progress:start -->
-Updated 2026-11-04 17:38 (UTC) by the Construction-PPE pipeline.
+Updated 2026-11-04 18:10 (UTC) by the Construction-PPE pipeline.
 
 **Stage:** S0 done, S1 in progress (T1 agent; S4-S7 follow later).
 
@@ -48,4 +48,16 @@ Updated 2026-11-04 17:38 (UTC) by the Construction-PPE pipeline.
 - In progress: S1 data verification, statistics, test-split carve, unified copy.
 - Next command: `.venv/Scripts/python.exe -m safety_ai.training.cli_cppe data all`
 - Open problems: none.
+
+**Run chain** (`reports/cppe/chain.json`): state **running**, current run r1, pid 27548, log `reports/cppe/logs/chain.log`.
+
+| run | state | name | epoch | box / cls / dfl loss | mAP50 | mAP50-95 | best mAP50-95 | elapsed | ETA |
+|---|---|---|---|---|---|---|---|---|---|
+| r0 | finished | ppe_cppe_n_20261104_r0 | 1/1 | - | - | - | 0.0404 | 3.2 min | 0.0 min |
+| r1 | running | ppe_cppe_n_20261104_r1 | - | - | - | - | - | 1.4 min | - |
+
+Check the chain:
+
+- `.venv/Scripts/python.exe -m safety_ai.training.cli_cppe status`
+- `type reports\cppe\logs\chain.log (and r1.log, r2.log, r3.log)`
 <!-- cppe-progress:end -->

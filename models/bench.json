@@ -1,0 +1,43 @@
+{
+  "created_at": "2026-11-04T06:43:27Z",
+  "host": {
+    "cpu": "Intel Core i5-10400F 2.90GHz",
+    "gpu": "NVIDIA GeForce GTX 1660 SUPER",
+    "ram_gb": 15.9
+  },
+  "results": [
+    {
+      "model": "ppe_n_sh17",
+      "backend": "onnx",
+      "device": "cpu",
+      "imgsz": 640,
+      "fps": 22.42,
+      "p50_ms": 43.34,
+      "p95_ms": 51.24,
+      "peak_rss_mb": 755.3,
+      "n": 225
+    },
+    {
+      "model": "ppe_n_sh17",
+      "backend": "openvino",
+      "device": "cpu",
+      "imgsz": 640,
+      "fps": 25.98,
+      "p50_ms": 37.09,
+      "p95_ms": 47.35,
+      "peak_rss_mb": 796.0,
+      "n": 260
+    },
+    {
+      "model": "ppe_n_sh17",
+      "backend": "pt",
+      "device": "cpu",
+      "imgsz": 640,
+      "fps": 29.12,
+      "p50_ms": 34.89,
+      "p95_ms": 38.49,
+      "peak_rss_mb": 722.0,
+      "n": 292
+    }
+  ]
+}

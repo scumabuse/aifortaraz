@@ -13,10 +13,12 @@ Order of operations (each step's counts end up in ``merge_summary.json`` and
    included) plus Roboflow augmentations of one source image (``<stem>.rf.<hash>`` names); a group
    never spans two splits;
 5. stratified 80/10/10 split (:mod:`safety_ai.training.split`, deterministic seed);
-6. write ``images/<split>/`` (hard links to ``data/raw``, copies where linking is impossible;
-   raw files are never modified), ``labels/<split>/``, ``index.jsonl``, ``data.yaml`` (names = the
-   unified taxonomy), ``train_oversampled.txt`` (train images containing a minority class listed
-   2-3 times) and ``eval_extras/`` (e.g. CSS ``NO-Safety Vest`` boxes in ``css_no_vest.json``).
+6. write ``images/<split>/`` (hard links to ``data/raw``, copies where linking is impossible,
+   trimmed copies of JPEGs with bytes after their end marker, which Ultralytics would otherwise
+   rewrite in place; raw files are never modified), ``labels/<split>/``, ``index.jsonl``,
+   ``data.yaml`` (names = the unified taxonomy), ``train_oversampled.txt`` (train images
+   containing a minority class listed 2-3 times) and ``eval_extras/`` (e.g. CSS
+   ``NO-Safety Vest`` boxes in ``css_no_vest.json``).
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ import re
 import shutil
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -67,8 +69,10 @@ __all__ = [
     "MergeError",
     "MergeSummary",
     "MergedRecord",
+    "jpeg_trailing_bytes",
     "merge_dataset",
     "oversample_factors",
+    "place_image",
     "roboflow_base",
 ]
 
@@ -78,6 +82,10 @@ EVAL_EXTRA_FILES: dict[tuple[str, str], str] = {("css", "NO-Safety Vest"): "css_
 """File names in ``eval_extras/`` per (source, eval-only class); others get a derived name."""
 
 _ROBOFLOW_RE = re.compile(r"^(?P<base>.+)\.rf\.[0-9a-f]{32}$")
+_JPEG_SOI = b"\xff\xd8"
+_JPEG_EOI = b"\xff\xd9"
+_JPEG_TAIL_WINDOW = 64 << 10
+"""Bytes read from the end of a JPEG when looking for its end marker."""
 
 
 class MergeError(RuntimeError):
@@ -150,10 +158,20 @@ class MergeSummary:
     eval_extras: dict[str, int] = field(default_factory=dict)
     linked: int = 0
     copied: int = 0
+    trimmed: int = 0
 
     def to_json(self) -> dict[str, Any]:
-        """Return a JSON-serializable dict."""
-        return asdict(self)
+        """Return a JSON-serializable dict.
+
+        The per-source counts are ``Counter`` objects while merging; ``dataclasses.asdict`` would
+        rebuild a Counter from ``(key, value)`` pairs (tuple keys), so they become dicts first.
+        """
+        plain = replace(
+            self,
+            per_source={key: dict(counts) for key, counts in self.per_source.items()},
+            fixes={key: dict(counts) for key, counts in self.fixes.items()},
+        )
+        return asdict(plain)
 
 
 @dataclass(slots=True)
@@ -196,6 +214,7 @@ def oversample_factors(
 
 def _load_candidates(
     sources: Sequence[str],
+    *,
     converted_root: Path,
     raw_root: Path,
     taxonomy: Taxonomy,
@@ -260,17 +279,52 @@ def _rank_function(
     return rank
 
 
-def _place(source: Path, target: Path, hardlink: bool) -> bool:
-    """Hard-link (True) or copy (False) ``source`` to ``target``."""
+def jpeg_trailing_bytes(path: Path) -> int | None:
+    """Return how many bytes follow the last JPEG end marker, or None for non-JPEG files.
+
+    A JPEG that does not end with ``FF D9`` (0 when it does) is rewritten in place by
+    Ultralytics' label check ("corrupt JPEG restored"); through a hard link that would modify the
+    raw download, so such files are placed as trimmed copies (:func:`place_image`). When no end
+    marker is found in the last 64 kB, the file size is returned.
+    """
+    with path.open("rb") as fh:
+        if fh.read(2) != _JPEG_SOI:
+            return None
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        fh.seek(max(0, size - _JPEG_TAIL_WINDOW))
+        tail = fh.read()
+    end = tail.rfind(_JPEG_EOI)
+    if end < 0:
+        return size
+    return len(tail) - (end + len(_JPEG_EOI))
+
+
+def place_image(source: Path, target: Path, *, hardlink: bool) -> str:
+    """Put ``source`` at ``target``; return ``linked``, ``copied`` or ``trimmed``.
+
+    The raw file is never modified: a hard link is used when allowed and possible, a copy
+    otherwise; a JPEG with bytes after its end marker is copied up to and including the marker
+    (the image data is unchanged) and one without any end marker gets the marker appended.
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
+    trailing = jpeg_trailing_bytes(source)
+    if trailing:
+        data = source.read_bytes()
+        end = data.rfind(_JPEG_EOI)
+        fixed = data[: end + len(_JPEG_EOI)] if end >= 0 else data + _JPEG_EOI
+        tmp = target.with_name(target.name + ".part")
+        tmp.write_bytes(fixed)
+        os.replace(tmp, target)
+        return "trimmed"
     if hardlink:
         try:
             os.link(source, target)
-            return True
+            return "linked"
         except OSError:
-            pass
+            _LOG.debug("cannot hard-link %s; copying", source)
     shutil.copy2(source, target)
-    return False
+    return "copied"
 
 
 def _clear_outputs(merged: Path) -> None:
@@ -285,7 +339,8 @@ def _clear_outputs(merged: Path) -> None:
 
 def _data_yaml(merged: Path, taxonomy: Taxonomy, config: MergeConfig) -> str:
     header = (
-        "# Generated by safety_ai.training.merge - do not edit; rebuild with `safety-ai data merge`.\n"
+        "# Generated by safety_ai.training.merge - do not edit; rebuild with\n"
+        "# `safety-ai data merge`.\n"
         f"# Sources (priority order): {', '.join(config.sources)}; split seed {config.seed}.\n"
     )
     payload = {
@@ -309,6 +364,7 @@ def _eval_extra_name(source: str, class_name: str) -> str:
 
 def _write_eval_extras(
     sources: Sequence[str],
+    *,
     converted_root: Path,
     merged: Path,
     records: Mapping[str, MergedRecord],
@@ -369,7 +425,12 @@ def merge_dataset(
         sources=list(config.sources), seed=config.seed, created_at=utc_now().isoformat()
     )
     candidates = _load_candidates(
-        config.sources, converted_root, raw_root, taxonomy, config, summary
+        config.sources,
+        converted_root=converted_root,
+        raw_root=raw_root,
+        taxonomy=taxonomy,
+        config=config,
+        summary=summary,
     )
     by_uid = {c.uid: c for c in candidates}
     cache = FingerprintCache(merged / "cache" / "fingerprints.jsonl")
@@ -387,11 +448,11 @@ def merge_dataset(
     minority = set(taxonomy.minority_classes)
     rank = _rank_function(by_uid, config.sources, minority)
     result = deduplicate(fingerprints, rank=rank, max_distance=config.near_distance)
-    for dropped, kept in (*result.exact_dropped.items(), *result.near_dropped.items()):
+    for dropped, winner in (*result.exact_dropped.items(), *result.near_dropped.items()):
         source = by_uid[dropped].item.source
         kind = "exact_duplicates" if dropped in result.exact_dropped else "near_duplicates"
         summary.per_source[source][kind] += 1
-        summary.cross_source_duplicates += int(source != by_uid[kept].item.source)
+        summary.cross_source_duplicates += int(source != by_uid[winner].item.source)
     summary.exact_duplicates = len(result.exact_dropped)
     summary.near_duplicates = len(result.near_dropped)
     kept = {uid: fingerprints[uid] for uid in result.keep}
@@ -412,9 +473,25 @@ def merge_dataset(
         ratios=config.ratios,
         seed=config.seed,
     )
-    records = _materialize(merged, by_uid, kept, group_of, item_strata, split_of, config, summary)
+    records = _materialize(
+        merged,
+        by_uid=by_uid,
+        kept=kept,
+        group_of=group_of,
+        item_strata=item_strata,
+        split_of=split_of,
+        config=config,
+        summary=summary,
+    )
     _write_outputs(merged, records, taxonomy, config, summary)
-    _write_eval_extras(config.sources, converted_root, merged, records, taxonomy, summary)
+    _write_eval_extras(
+        config.sources,
+        converted_root=converted_root,
+        merged=merged,
+        records=records,
+        taxonomy=taxonomy,
+        summary=summary,
+    )
     write_json_atomic(merged / "merge_summary.json", summary.to_json())
     return summary
 
@@ -435,6 +512,7 @@ def _roboflow_links(candidates: Iterable[_Candidate]) -> list[tuple[str, str]]:
 
 def _materialize(
     merged: Path,
+    *,
     by_uid: Mapping[str, _Candidate],
     kept: Mapping[str, ImageFingerprint],
     group_of: Mapping[str, str],
@@ -444,7 +522,9 @@ def _materialize(
     summary: MergeSummary,
 ) -> dict[str, MergedRecord]:
     _clear_outputs(merged)
-    stems = unique_safe_names(f"{by_uid[uid].item.source}_{by_uid[uid].item.item_id}" for uid in kept)
+    stems = unique_safe_names(
+        f"{by_uid[uid].item.source}_{by_uid[uid].item.item_id}" for uid in kept
+    )
     records: dict[str, MergedRecord] = {}
     for uid in sorted(kept):
         candidate = by_uid[uid]
@@ -472,16 +552,18 @@ def _materialize(
             fixes=candidate.fixes,
         )
 
-    def write(uid: str) -> bool:
+    def write(uid: str) -> str:
         record = records[uid]
         write_text_atomic(merged / record.label, format_yolo_lines(by_uid[uid].boxes))
-        return _place(by_uid[uid].image, merged / record.file, config.hardlink)
+        return place_image(by_uid[uid].image, merged / record.file, hardlink=config.hardlink)
 
-    def on_result(uid: str, linked: bool | None, error: BaseException | None) -> None:
+    def on_result(uid: str, how: str | None, error: BaseException | None) -> None:
         if error is not None:
             raise error
-        if linked:
+        if how == "linked":
             summary.linked += 1
+        elif how == "trimmed":
+            summary.trimmed += 1
         else:
             summary.copied += 1
 
@@ -494,7 +576,9 @@ def _materialize(
         stats["final"] += 1
         stats[record.split] += 1
         stats["backgrounds"] += int(record.background)
-    summary.splits = {split: sum(1 for r in records.values() if r.split == split) for split in SPLITS}
+    summary.splits = {
+        split: sum(1 for r in records.values() if r.split == split) for split in SPLITS
+    }
     return records
 
 

@@ -17,8 +17,9 @@ in ``_latest`` are rejected because they would shadow the aliases. An entry with
 change what ``ppe_latest`` or ``ppe_n_latest`` resolve to (DECISIONS.md T-008: the
 Construction-PPE models are reached through their names and ``ppe_cppe_latest`` only).
 
-``aliases``, ``exclude_from_latest`` and an export's ``imgsz`` are written to the file only when
-they differ from their defaults, so entries that do not use them keep their exact JSON.
+``aliases``, ``exclude_from_latest``, ``training`` and an export's ``imgsz`` are written to the
+file only when they differ from their defaults, so entries that do not use them keep their exact
+JSON.
 
 Every path in the file is POSIX-style and relative to the repository root, which is the registry
 file's parent's parent (``models/registry.json`` -> the directory containing ``models/``). Writes
@@ -235,6 +236,8 @@ class RegistryEntry(BaseModel):
     exclude_from_latest: bool = False
     """Keep this entry out of the computed ``<role>_latest`` / ``<role>_<variant>_latest``
     aliases (DECISIONS.md T-008)."""
+    training: dict[str, Any] | None = None
+    """Provenance of a training run (run id, epochs run, wall time, ...), when trained here."""
 
     @field_validator("name")
     @classmethod
@@ -328,13 +331,15 @@ class RegistryEntry(BaseModel):
 
     @model_serializer(mode="wrap")
     def _omit_unused_alias_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        """Write ``aliases``/``exclude_from_latest`` only when set, so entries that do not use
-        them keep their exact JSON."""
+        """Write ``aliases``/``exclude_from_latest``/``training`` only when set, so entries that
+        do not use them keep their exact JSON."""
         data: dict[str, Any] = handler(self)
         if not self.aliases:
             data.pop("aliases", None)
         if not self.exclude_from_latest:
             data.pop("exclude_from_latest", None)
+        if self.training is None:
+            data.pop("training", None)
         return data
 
     @property

@@ -53,9 +53,9 @@ sources:
     drop: [medical-suit, safety-suit]
 
   css:
-    title: Construction Site Safety (Roboflow Universe, Kaggle mirror)
+    title: Construction Site Safety (Roboflow Universe v28, Kaggle snehilsanyal/construction-site-safety-image-dataset-roboflow v3)
     licence: CC BY 4.0
-    verified_against: pending — checked against the downloaded data.yaml by `safety-ai data convert`
+    verified_against: data.yaml of the downloaded archive (results_yolov8n_100e/kaggle/working/ppe_data.yaml), 10 classes, all ids 0-9 used, checked 2026-11-04
     names: [Hardhat, Mask, NO-Hardhat, NO-Mask, NO-Safety Vest, Person, Safety Cone, Safety Vest, machinery, vehicle]
     map:
       Hardhat: helmet
@@ -70,9 +70,9 @@ sources:
     eval_only: [NO-Safety Vest]
 
   hardhat:
-    title: Hard Hat Workers (Kaggle andrewmvd/hard-hat-detection)
+    title: Hard Hat Workers (Kaggle andrewmvd/hard-hat-detection v1)
     licence: CC0 1.0
-    verified_against: pending — checked against the downloaded annotations by `safety-ai data convert`
+    verified_against: object names of the 5000 downloaded VOC annotations (helmet 18966, head 5785, person 751 boxes; the dataset ships no class file), checked 2026-11-04
     names: [helmet, head, person]
     map:
       helmet: helmet
@@ -81,36 +81,46 @@ sources:
     drop: []
 
   chv:
-    title: CHV — Color Helmet and Vest (github.com/ZijianWang-ZW/PPE_detection)
-    licence: free use with citation (see repository README)
-    verified_against: pending — checked against the downloaded data.yaml by `safety-ai data convert`
-    names: [person, vest, blue, red, white, yellow]
+    title: CHV - Color Helmet and Vest (github.com/ZijianWang-ZW/PPE_detection)
+    licence: free use with citation (Wang et al., Sensors 2021, 21(10):3478)
+    verified_against: annotations/README.md of the downloaded CHV_dataset.zip (0 person, 1 vest, 2-5 blue/red/white/yellow helmet), checked 2026-11-04
+    names: [person, vest, blue helmet, red helmet, white helmet, yellow helmet]
     map:
       person: person
       vest: vest
-      blue: helmet
-      red: helmet
-      white: helmet
-      yellow: helmet
+      blue helmet: helmet
+      red helmet: helmet
+      white helmet: helmet
+      yellow helmet: helmet
     drop: []
 
   forklift:
-    title: Forklift detection dataset(s)
-    licence: per dataset, recorded in docs/TRAINING.md
-    verified_against: pending
-    names: [forklift]
+    title: Forklift Dataset (Kaggle manoj223/forklift-dataset v1)
+    licence: MIT
+    verified_against: Total_marge_Forklift_Dataset/data.yaml of the Kaggle archive (nc 2, names forklift, not_forklift), checked 2026-11-04
+    names: [forklift, not_forklift]
     map:
       forklift: forklift
-    drop: []
+    drop: [not_forklift]
 
   harness:
-    title: Safety-harness detection dataset(s)
-    licence: per dataset, recorded in docs/TRAINING.md
-    verified_against: pending
-    names: [harness]
+    title: Safety Harness (Kaggle manoj223/safety-harness v1)
+    licence: MIT
+    verified_against: data.yaml of the downloaded archive (nc 11) and the label files (used ids 0, 2, 3, 4, 6, 7, 8, 10), boxes inspected visually, checked 2026-11-04
+    names: [Helmet, Safety_Vest, Safety_goggles, Safety_shoes, No_helmet, No_Vest, No_goggles, No_SafetyShoes, Person, Slippers, Safety_Harness]
     map:
-      harness: harness
-    drop: []
+      Helmet: helmet
+      Safety_Vest: vest
+      Safety_goggles: glasses
+      Safety_shoes: boots
+      No_helmet: head
+      No_SafetyShoes: foot
+      Slippers: foot
+      Person: person
+      Safety_Harness: harness
+    # No_Vest is person-level (like CSS NO-Safety Vest); No_goggles boxes only the eye region,
+    # which matches neither the unified face box nor glasses, so both are dropped.
+    drop: [No_Vest, No_goggles]
 
   coco:
     title: COCO (runtime vehicle fallback, spec 5.3)
@@ -123,3 +133,26 @@ sources:
       truck: vehicle
       bus: vehicle
     drop: []
+
+  construction_ppe:
+    title: Ultralytics Construction-PPE (November 2026 release; 1,000 images, 800 train / 200 val, 14,863 boxes)
+    licence: CC BY 4.0
+    verified_against: data.yaml, README.md and manifest.jsonl of the downloaded archive (647,666,037 bytes, sha256 e5817aa9c73f33e525d76ca6bc6af4e4eac9dcea9bcfef1cfd1a71c09fbc1232) and ultralytics 8.4.201 cfg/datasets/construction-ppe.yaml, checked 2026-11-04 (DECISIONS.md T-001, T-003)
+    names: [helmet, gloves, vest, boots, goggles, Person, no_helmet, no_goggle, no_gloves, no_boots, forklift, no_vest]
+    map:
+      helmet: helmet
+      gloves: gloves
+      vest: vest
+      boots: boots
+      goggles: glasses
+      Person: person
+      no_helmet: head
+      no_goggle: face
+      no_gloves: hands
+      no_boots: foot
+      forklift: forklift
+    # no_vest boxes are bare torsos inside Person boxes; the taxonomy has no torso class and the
+    # runtime decides vest MISSING from a tracked person without a vest (reports/data_stats.md).
+    drop: [no_vest]
+    # Class ids of the unified training copy data/construction-ppe-unified (safety_ai/training/remap.py).
+    training_names: [person, head, face, hands, foot, helmet, vest, glasses, gloves, boots, forklift]

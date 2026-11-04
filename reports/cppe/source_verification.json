@@ -1,0 +1,81 @@
+{
+  "root": "C:/Users/arkhi/Downloads/ocherednoiAIdlyahackathona/safety-ai/data/construction-ppe",
+  "ok": true,
+  "names": [
+    "helmet",
+    "gloves",
+    "vest",
+    "boots",
+    "goggles",
+    "Person",
+    "no_helmet",
+    "no_goggle",
+    "no_gloves",
+    "no_boots",
+    "forklift",
+    "no_vest"
+  ],
+  "counts": {
+    "train": {
+      "images": 800,
+      "labels": 800,
+      "backgrounds": 0,
+      "boxes": 11902
+    },
+    "val": {
+      "images": 200,
+      "labels": 200,
+      "backgrounds": 0,
+      "boxes": 2961
+    }
+  },
+  "instances": {
+    "train": {
+      "helmet": 1282,
+      "gloves": 1548,
+      "vest": 1476,
+      "boots": 2003,
+      "goggles": 612,
+      "Person": 1962,
+      "no_helmet": 634,
+      "no_goggle": 265,
+      "no_gloves": 839,
+      "no_boots": 569,
+      "forklift": 275,
+      "no_vest": 437
+    },
+    "val": {
+      "helmet": 294,
+      "gloves": 381,
+      "vest": 340,
+      "boots": 481,
+      "goggles": 139,
+      "Person": 481,
+      "no_helmet": 179,
+      "no_goggle": 82,
+      "no_gloves": 203,
+      "no_boots": 178,
+      "forklift": 73,
+      "no_vest": 130
+    }
+  },
+  "problem_counts": {
+    "corner_outside": 94
+  },
+  "problem_examples": {
+    "corner_outside": [
+      "train/source-3978abe9cfed5d8a5faa5a98dfe4b00a.txt:8: 5 0.402330 0.574780 0.288170 0.850450",
+      "train/source-6432776643522ab4c03763dc7e393f0d.txt:2: 5 0.353120 0.696720 0.244400 0.606570",
+      "train/source-c71f4bf2906e8722611490448d962654.txt:7: 5 0.259280 0.661150 0.195150 0.677710",
+      "train/source-de031000ca69a5d000c5b9c021f86309.txt:3: 0 0.457270 0.011040 0.020420 0.022090",
+      "train/source-f2c0cc19bce353d225ec84760d453285.txt:11: 10 0.091240 0.638180 0.182490 0.230580",
+      "train/ultralytics-ppe-nov2026-001.txt:25: 5 0.058270 0.537100 0.116550 0.356050",
+      "train/ultralytics-ppe-nov2026-035.txt:12: 5 0.281030 0.542690 0.268570 0.914630",
+      "train/ultralytics-ppe-nov2026-062.txt:7: 10 0.539710 0.357570 0.920580 0.715150",
+      "train/ultralytics-ppe-nov2026-067.txt:1: 5 0.630850 0.561140 0.518520 0.877730",
+      "train/ultralytics-ppe-nov2026-093.txt:7: 5 0.586910 0.521760 0.253600 0.956490"
+    ]
+  },
+  "differences": [],
+  "manifest_checked": 1000
+}

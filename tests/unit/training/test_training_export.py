@@ -313,6 +313,7 @@ def test_export_registers_every_artefact_with_its_sha256(
     assert entry.exports["openvino"].sha256 == sha256_path(models / "det_n_20261104_openvino_model")
     for fmt in ("onnx", "openvino", "tensorrt"):
         assert registry.verify(entry, fmt)
+        assert entry.exports[fmt].imgsz == 416  # recorded, so make models can rebuild it
     assert entry.exports["onnx"].created_at == fake_clock.now_utc()
 
     by_format = {kwargs["format"]: kwargs for _, kwargs in log}
@@ -344,7 +345,9 @@ def test_export_skips_unavailable_formats_with_a_reason(
     assert [(s.format, s.reason) for s in result.skipped] == [
         ("tensorrt", "TensorRT needs a CUDA GPU and CUDA is not available")
     ]
-    assert set(registry.resolve("det_n_20261104").exports) == {"onnx"}
+    exports = registry.resolve("det_n_20261104").exports
+    assert set(exports) == {"onnx"}
+    assert exports["onnx"].imgsz == 320
     assert len(log) == 1
 
 

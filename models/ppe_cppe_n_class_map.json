@@ -1,0 +1,18 @@
+{
+  "model": "ppe_cppe_n",
+  "class_map": {
+    "helmet": "helmet",
+    "gloves": "gloves",
+    "vest": "vest",
+    "boots": "boots",
+    "goggles": "glasses",
+    "Person": "person",
+    "no_helmet": "head",
+    "no_goggle": "face",
+    "no_gloves": "hands",
+    "no_boots": "foot",
+    "forklift": "forklift",
+    "no_vest": null
+  },
+  "note": "no_vest has no taxonomy class and is ignored; this release has no 'none' class"
+}

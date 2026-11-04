@@ -3,7 +3,8 @@
 Public API (ARCHITECTURE 3.3):
 
 - :class:`CameraHealth`: per-camera snapshot (stream state, processed FPS, last frame age, backend
-  reachability, spool depth, active events, restarts, failed flag, uptime).
+  reachability and API-key state, spool depth, active events, restarts, failed flag and reason,
+  uptime, applied configuration version).
 - :func:`unhealthy_reasons` / :func:`evaluate_camera`: the health rules below.
 - :class:`HealthReport`: every camera plus process metadata; ``healthy`` and ``to_json()``.
 - :class:`HealthServer`: ``GET /health`` (200 when every enabled camera is healthy, otherwise 503,
@@ -117,6 +118,12 @@ class CameraHealth:
     """True when the supervisor gave up restarting the worker."""
     uptime_s: float = 0.0
     """Seconds since the camera's current worker started (drives the FPS warm-up)."""
+    backend_unauthorized: bool = False
+    """True while the backend refuses the API key (HTTP 401/403; diagnostic only)."""
+    config_version: int | None = None
+    """Version of the camera configuration the worker applies (None: no configuration yet)."""
+    error: str | None = None
+    """Readable reason why the camera is failed or not running (None when there is none)."""
 
     def __post_init__(self) -> None:
         """Store enum stream states (e.g. ``StreamState.CONNECTED``) as their plain value."""
@@ -136,7 +143,7 @@ def unhealthy_reasons(
     """
     reasons: list[str] = []
     if health.failed:
-        reasons.append("failed: restart limit reached")
+        reasons.append(f"failed: {health.error or 'restart limit reached'}")
     if health.stream_state != _CONNECTED:
         reasons.append(f"stream {health.stream_state}")
     age = health.last_frame_age_s
@@ -216,11 +223,14 @@ def _camera_dict(camera: CameraHealth) -> dict[str, Any]:
         "processed_fps": _json_number(camera.processed_fps, 2),
         "last_frame_age_s": _json_number(camera.last_frame_age_s),
         "backend_reachable": camera.backend_reachable,
+        "backend_unauthorized": camera.backend_unauthorized,
         "spool_depth": int(camera.spool_depth),
         "active_events": int(camera.active_events),
         "restarts": int(camera.restarts),
         "failed": camera.failed,
         "uptime_s": _json_number(camera.uptime_s, 1),
+        "config_version": camera.config_version,
+        "error": camera.error,
     }
 
 

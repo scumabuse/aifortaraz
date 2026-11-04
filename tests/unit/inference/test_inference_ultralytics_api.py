@@ -173,6 +173,7 @@ def test_bench_with_a_real_model(
         tmp_registry,
         images,
         warmup=2,
+        isolate=False,
         loader=lambda path, task: detect_model,
     )
     [result] = report.results

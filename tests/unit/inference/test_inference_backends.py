@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import logging
 from collections.abc import Callable
@@ -33,15 +34,25 @@ T0 = datetime(2026, 11, 4, 3, 0, 0, tzinfo=timezone.utc)
 
 @pytest.fixture
 def hardware(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
-    """Set the probed hardware: ``hardware(cuda=True, count=1, mps=False, modules=(...))``."""
+    """Set the probed hardware.
+
+    ``hardware(cuda=True, count=1, mps=False, modules=(...), providers=(...))``; ``providers``
+    are the ONNX Runtime execution providers (default: the CPU one only).
+    """
 
     def configure(
-        *, cuda: bool = False, count: int = 1, mps: bool = False, modules: tuple[str, ...] = ()
+        *,
+        cuda: bool = False,
+        count: int = 1,
+        mps: bool = False,
+        modules: tuple[str, ...] = (),
+        providers: tuple[str, ...] = ("CPUExecutionProvider",),
     ) -> None:
         monkeypatch.setattr(backends, "_cuda_available", lambda: cuda)
         monkeypatch.setattr(backends, "_cuda_device_count", lambda: count if cuda else 0)
         monkeypatch.setattr(backends, "_mps_available", lambda: mps)
         monkeypatch.setattr(backends, "_module_importable", lambda name: name in modules)
+        monkeypatch.setattr(backends, "_onnx_providers", lambda: frozenset(providers))
 
     configure()
     return configure
@@ -159,6 +170,51 @@ def test_tensorrt_needs_cuda_device_and_cuda(
     assert available_backends(exported_entry, "cuda:0", root=tmp_path) == ["pt"]
 
 
+def test_openvino_runs_only_on_the_cpu(
+    hardware: Callable[..., None], exported_entry: RegistryEntry, tmp_path: Path
+) -> None:
+    hardware(cuda=True, mps=True, modules=("openvino",))
+    assert available_backends(exported_entry, "cpu", root=tmp_path) == ["pt", "openvino"]
+    assert available_backends(exported_entry, "cuda:0", root=tmp_path) == ["pt"]
+    assert available_backends(exported_entry, "mps", root=tmp_path) == ["pt"]
+
+
+def test_onnx_on_an_accelerator_needs_its_execution_provider(
+    hardware: Callable[..., None], exported_entry: RegistryEntry, tmp_path: Path
+) -> None:
+    hardware(cuda=True, mps=True, modules=("onnxruntime",))
+    assert available_backends(exported_entry, "cpu", root=tmp_path) == ["pt", "onnx"]
+    assert available_backends(exported_entry, "cuda:0", root=tmp_path) == ["pt"]
+    assert available_backends(exported_entry, "mps", root=tmp_path) == ["pt"]
+    hardware(
+        cuda=True,
+        modules=("onnxruntime",),
+        providers=("CUDAExecutionProvider", "CPUExecutionProvider"),
+    )
+    assert available_backends(exported_entry, "cuda:0", root=tmp_path) == ["pt", "onnx"]
+    assert available_backends(exported_entry, "mps", root=tmp_path) == ["pt"]
+    hardware(mps=True, modules=("onnxruntime",), providers=("CoreMLExecutionProvider",))
+    assert available_backends(exported_entry, "mps", root=tmp_path) == ["pt", "onnx"]
+
+
+def test_onnx_providers_probe_reports_the_installed_runtime() -> None:
+    providers = backends._onnx_providers()
+    assert isinstance(providers, frozenset)
+    assert all(isinstance(p, str) for p in providers)
+
+
+def test_onnx_providers_probe_survives_a_broken_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_import = builtins.__import__
+
+    def broken(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "onnxruntime":
+            raise OSError("DLL load failed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken)
+    assert backends._onnx_providers() == frozenset()
+
+
 def test_missing_export_files_are_unavailable(
     hardware: Callable[..., None], exported_entry: RegistryEntry, tmp_path: Path
 ) -> None:
@@ -248,6 +304,44 @@ def test_explicit_unavailable_backend_falls_back_to_pt_with_one_warning(
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert "tensorrt" in warnings[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    ("requested", "device", "hint"),
+    [
+        ("openvino", "cuda:0", "OpenVINO runs on the CPU"),
+        ("onnx", "cuda:0", "no CUDAExecutionProvider"),
+        ("onnx", "mps", "no CoreMLExecutionProvider"),
+        ("tensorrt", "cpu", "TensorRT needs a CUDA device"),
+    ],
+)
+def test_device_bound_backends_explain_the_fallback(
+    hardware: Callable[..., None],
+    exported_entry: RegistryEntry,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    requested: str,
+    device: str,
+    hint: str,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="safety_ai.inference.backends")
+    hardware(cuda=True, mps=True, modules=("onnxruntime", "openvino", "tensorrt"))
+    backend, _ = choose_backend(requested, exported_entry, device, tmp_path / "x", root=tmp_path)
+    assert backend == "pt"
+    [warning] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert hint in warning.getMessage()
+
+
+def test_runtime_without_device_constraint_gets_no_hint(
+    hardware: Callable[..., None],
+    exported_entry: RegistryEntry,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="safety_ai.inference.backends")
+    choose_backend("onnx", exported_entry, "cpu", tmp_path / "x", root=tmp_path)
+    [warning] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warning.getMessage().endswith("(available: pt); using pt")
 
 
 def test_auto_picks_the_fastest_measured_backend_per_device_class(
@@ -417,6 +511,43 @@ def test_load_model_checks_the_class_count(
     with pytest.raises(RegistryError, match="3 classes but the registry maps 2"):
         load_model(entry, tmp_registry, loader=lambda p, t: _Model({0: "a", 1: "b", 2: "c"}))
     assert load_model(entry, tmp_registry, loader=lambda p, t: _Model(None)).backend == "pt"
+
+
+class _ExportedModel:
+    """Like an exported Ultralytics model: ``names`` builds a predictor on the default device."""
+
+    def __init__(self) -> None:
+        self.overrides: dict[str, Any] = {"task": "detect"}
+        self.devices_at_names: list[Any] = []
+
+    @property
+    def names(self) -> dict[int, str]:
+        self.devices_at_names.append(self.overrides.get("device"))
+        return {0: "person"}
+
+
+def test_load_model_pins_the_device_before_reading_class_names(
+    hardware: Callable[..., None],
+    tmp_registry: ModelRegistry,
+    make_entry: Callable[..., RegistryEntry],
+    add_weights: Callable[..., RegistryEntry],
+) -> None:
+    entry = add_weights(tmp_registry, make_entry(classes=["person"]))
+    model = _ExportedModel()
+    loaded = load_model(entry, tmp_registry, device="cuda:0", loader=lambda p, t: model)
+    assert loaded.model is model
+    assert model.devices_at_names == ["cuda:0"]
+    assert model.overrides == {"task": "detect", "device": "cuda:0"}
+
+
+def test_pin_device_ignores_objects_without_overrides() -> None:
+    plain = _Model({0: "person"})
+    backends.pin_device(plain, "cpu")
+    assert not hasattr(plain, "overrides")
+    odd = _Model(None)
+    odd.overrides = ("not", "a", "dict")  # type: ignore[attr-defined]
+    backends.pin_device(odd, "cpu")
+    assert odd.overrides == ("not", "a", "dict")  # type: ignore[attr-defined]
 
 
 def test_load_model_missing_weights(

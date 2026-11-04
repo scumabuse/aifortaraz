@@ -361,6 +361,34 @@ def test_inspect_jpeg_rejects_non_jpeg_images() -> None:
     _expect_error(lambda: m.inspect_jpeg(disguised, max_side=1280, what="snapshot"), "snapshot:")
 
 
+def test_inspect_jpeg_rejects_data_decoded_as_another_format(
+    monkeypatch: pytest.MonkeyPatch, jpeg: Any
+) -> None:
+    # JPEG magic bytes are necessary, not sufficient: the decoder must also call it a JPEG.
+    class OtherFormat:
+        format = "PNG"
+        size = (64, 32)
+
+        def __enter__(self) -> OtherFormat:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def load(self) -> None:
+            return None
+
+    monkeypatch.setattr(m.Image, "open", lambda stream: OtherFormat())
+    _expect_error(
+        lambda: m.inspect_jpeg(jpeg(64, 32), max_side=1280, what="snapshot"), "decoded as PNG"
+    )
+
+
+def test_inspect_jpeg_returns_the_size_of_a_valid_jpeg(jpeg: Any) -> None:
+    assert m.inspect_jpeg(jpeg(960, 540), max_side=960, what="frame") == (960, 540)
+    _expect_error(lambda: m.inspect_jpeg(jpeg(961, 540), max_side=960, what="frame"), "961x540")
+
+
 def test_decode_base64_is_strict() -> None:
     assert m.decode_base64(base64.b64encode(b"abc").decode(), what="x") == b"abc"
     _expect_error(lambda: m.decode_base64("data:image/jpeg;base64,AAAA", what="x"), "x:")
@@ -387,13 +415,23 @@ def test_patch_body_is_exactly_ended_at() -> None:
 
 def test_contract_heartbeat_example_is_accepted(payloads: Any) -> None:
     heartbeat = m.validate_heartbeat(payloads.heartbeat())
-    assert heartbeat.extra.model_family is None
+    assert heartbeat.extra.model_extra == payloads.heartbeat()["extra"]
+    assert heartbeat.extra.supported_ppe is None
 
 
-def test_heartbeat_model_family_is_optional(payloads: Any) -> None:
-    payload = payloads.heartbeat()
-    payload["extra"]["model_family"] = "yolo26"
-    assert m.validate_heartbeat(payload).extra.model_family == "yolo26"
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {},
+        {"model_family": "yolo26", "gpu_temp": 61, "nested": {"a": [1, None, "x"]}},
+        {"device": 0, "queue_depth": -1, "stream": None},  # no longer constrained (free-form)
+        {"supported_ppe": []},
+        {"supported_ppe": list(m.PPE_CODES)},
+    ],
+)
+def test_heartbeat_extra_is_free_form(payloads: Any, extra: dict[str, Any]) -> None:
+    heartbeat = m.validate_heartbeat(payloads.heartbeat(extra=extra))
+    assert heartbeat.extra.model_dump(exclude_unset=True) == extra
 
 
 HEARTBEAT_RULES: list[tuple[str, Callable[[dict[str, Any]], None], str]] = [
@@ -404,13 +442,14 @@ HEARTBEAT_RULES: list[tuple[str, Callable[[dict[str, Any]], None], str]] = [
     ("model_version missing", _delete("model_version"), "model_version"),
     ("camera_id missing", _delete("camera_id"), "camera_id"),
     ("top-level extra key", _set("uptime", 5), "uptime: Extra inputs"),
-    ("extra unknown key", _set("extra.gpu_temp", 61), "gpu_temp: Extra inputs"),
-    ("extra device missing", _delete("extra.device"), "device"),
-    ("extra backend missing", _delete("extra.backend"), "backend"),
-    ("queue_depth negative", _set("extra.queue_depth", -1), "queue_depth"),
-    ("frames_dropped float", _set("extra.frames_dropped", 1.5), "frames_dropped"),
-    ("stream missing", _delete("extra.stream"), "stream"),
-    ("model_family null", _set("extra.model_family", None), "model_family"),
+    ("extra missing", _delete("extra"), "extra: Field required"),
+    ("extra not an object", _set("extra", ["device", "cpu"]), "extra: Input should be"),
+    ("extra NaN", _set("extra.temp", float("nan")), "no NaN or Infinity"),
+    ("extra over 16 KB", _set("extra.blob", "x" * 16_400), "at most 16384"),
+    ("supported_ppe code", _set("extra.supported_ppe", ["hardhat"]), "supported_ppe.0"),
+    ("supported_ppe null", _set("extra.supported_ppe", None), "list of PPE codes when present"),
+    ("supported_ppe string", _set("extra.supported_ppe", "helmet"), "supported_ppe"),
+    ("supported_ppe twice", _set("extra.supported_ppe", ["vest", "vest"]), "more than once"),
 ]
 
 
@@ -519,7 +558,8 @@ WS_RULES: list[tuple[str, str, Callable[[dict[str, Any]], None], str]] = [
     ("frame base64", "frame", _set("jpeg_base64", "not base64!"), "jpeg_base64"),
     ("frame not jpeg", "frame", _set("jpeg_base64", "R0lGODlhAQABAAAAACw="), "magic bytes"),
     ("frame extra", "frame", _set("width", 960), "width: Extra inputs"),
-    ("heartbeat extra key", "heartbeat", _set("extra.gpu", "x"), "gpu: Extra inputs"),
+    ("heartbeat top-level key", "heartbeat", _set("gpu", "x"), "gpu: Extra inputs"),
+    ("heartbeat supported_ppe", "heartbeat", _set("extra.supported_ppe", [1]), "supported_ppe"),
     ("heartbeat status", "heartbeat", _set("status", "down"), "status"),
 ]
 
@@ -636,11 +676,22 @@ CONFIG_RULES: list[tuple[str, Callable[[dict[str, Any]], None], str]] = [
     ("polygon range", _set("zones.0.polygon.0", [1.2, 0.1]), "polygon"),
     ("schedule time number", _set("zones.0.rules.schedule", _schedule([1], 480, "20:00")), "from"),
     (
+        "schedule time format",
+        _set("zones.0.rules.schedule", _schedule([1], "8:00", "20:00")),
+        "must be HH:MM",
+    ),
+    (
         "schedule time range",
         _set("zones.0.rules.schedule", _schedule([1], "08:00", "25:00")),
         "outside 00:00..24:00",
     ),
+    (
+        "schedule minutes",
+        _set("zones.0.rules.schedule", _schedule([1], "08:00", "24:30")),
+        "outside 00:00..24:00",
+    ),
     ("schedule day", _set("zones.0.rules.schedule", _schedule([0], "08:00", "20:00")), "days"),
+    ("schedule day 8", _set("zones.0.rules.schedule", _schedule([8], "08:00", "20:00")), "days"),
     ("rule ppe code", _set("zones.0.rules.required_ppe", ["hardhat"]), "required_ppe"),
     ("rule extra", _set("zones.0.rules.max_speed", 3), "max_speed: Extra inputs"),
     ("severity override", _set("zones.0.rules.severity_override", "extreme"), "severity_override"),
@@ -688,10 +739,90 @@ def test_excerpt_elides_base64_and_truncates() -> None:
 def test_parse_json_object_checks_content_type_and_shape() -> None:
     assert m.parse_json_object("application/json; charset=utf-8", b'{"a": 1}', what="x") == {"a": 1}
     assert m.parse_json_object("application/vnd.api+json", b"{}", what="x") == {}
-    _expect_error(lambda: m.parse_json_object(None, b"{}", what="x"), "<missing>")
-    _expect_error(lambda: m.parse_json_object("text/plain", b"{}", what="x"), "text/plain")
-    _expect_error(lambda: m.parse_json_object("application/json", b"{", what="x"), "<body>")
+    assert (
+        _expect_error(lambda: m.parse_json_object(None, b"{}", what="x"), "<missing>").status == 415
+    )
+    wrong = _expect_error(lambda: m.parse_json_object("text/plain", b"{}", what="x"), "text/plain")
+    assert wrong.status == 415
+    bad_json = _expect_error(
+        lambda: m.parse_json_object("application/json", b"{", what="x"), "<body>"
+    )
+    assert bad_json.status == 422
     _expect_error(lambda: m.parse_json_object("application/json", b"[]", what="x"), "JSON object")
+
+
+def test_contract_errors_default_to_422() -> None:
+    assert m.ContractError("invalid event", ["a: b"]).status == 422
+    assert m.ContractError("too big", status=413).errors == ("too big",)
+
+
+def test_check_snapshot_size_allows_5_mb_and_refuses_more() -> None:
+    m.check_snapshot_size(bytes(m.MAX_SNAPSHOT_BYTES))
+    error = _expect_error(
+        lambda: m.check_snapshot_size(bytes(m.MAX_SNAPSHOT_BYTES + 1), what="snapshot_base64"),
+        f"snapshot_base64: {m.MAX_SNAPSHOT_BYTES + 1} bytes",
+    )
+    assert error.status == 413
+    assert error.reason == "snapshot_base64 is larger than 5 MB"
+
+
+def test_default_severities_follow_the_contract() -> None:
+    assert dict(m.DEFAULT_SEVERITY) == {
+        "fall_detected": "critical",
+        "person_immobile": "critical",
+        "zone_intrusion": "high",
+        "vehicle_proximity": "high",
+        "ppe_violation": "medium",
+        "overcrowding": "low",
+        "custom": "medium",
+    }
+
+
+def _zone(zone_type: str, override: str | None = None) -> m.ZoneModel:
+    return m.ZoneModel.model_validate(
+        {
+            "id": "z1",
+            "type": zone_type,
+            "polygon": [[0.1, 0.1], [0.9, 0.1], [0.5, 0.9]],
+            "rules": {"severity_override": override},
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("event_type", "severity", "zone", "missing", "expected"),
+    [
+        ("ppe_violation", None, None, ["helmet"], "medium"),
+        ("ppe_violation", None, "ppe", ["helmet"], "medium"),
+        ("ppe_violation", None, "danger", ["helmet", "vest"], "high"),
+        ("ppe_violation", None, "danger", ["vest"], "medium"),
+        ("ppe_violation", None, "danger:low", ["helmet"], "low"),
+        ("ppe_violation", "critical", "danger:low", ["helmet"], "critical"),
+        ("fall_detected", None, None, None, "critical"),
+        ("fall_detected", None, "ppe:medium", None, "medium"),
+        ("zone_intrusion", None, "danger", None, "high"),
+        ("overcrowding", None, "counting", None, "low"),
+        ("custom", None, None, None, "medium"),
+    ],
+)
+def test_resolve_severity(
+    payloads: Any,
+    event_type: str,
+    severity: str | None,
+    zone: str | None,
+    missing: list[str] | None,
+    expected: str,
+) -> None:
+    zone_id = None if zone is None and event_type in ("fall_detected", "person_immobile") else "z1"
+    payload = payloads.event(event_type, zone_id=zone_id, severity=severity)
+    if missing is not None:
+        payload["details"]["missing_ppe"] = missing
+    event = m.validate_event_payload(payload)
+    zone_model = None
+    if zone is not None:
+        zone_type, _, override = zone.partition(":")
+        zone_model = _zone(zone_type, override or None)
+    assert m.resolve_severity(event, zone_model) == expected
 
 
 def test_media_type_of() -> None:

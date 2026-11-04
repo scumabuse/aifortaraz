@@ -4,7 +4,16 @@ For every requested model x available backend on one device, :func:`bench` runs 
 inferences, then cycles the sample images for the requested number of seconds, timing every
 inference end to end (pre-processing, model, post-processing and the copy of the boxes to the
 host). It reports FPS (inferences / measured wall time), latency p50/p95 in milliseconds and the
-peak resident set size of the benchmarking process (sampled after every inference) in MB.
+peak resident set size (sampled after every inference) in MB.
+
+By default every model x backend combination runs in its own freshly spawned process, so each
+row describes one runtime alone: Ultralytics changes process-wide state while it runs (after an
+ONNX or OpenVINO CPU model is set up it limits torch to 2 threads, which would slow every later
+PyTorch row), and allocator caches and earlier models would inflate the later rows' RSS. The
+peak RSS is therefore that of a process holding Python, torch, Ultralytics, the runtime and the
+one model, which is what a camera worker needs. ``isolate=False`` measures in the calling process
+instead (the test hooks ``loader``, ``timer`` and ``rss_mb`` need it); torch's thread count is
+restored after each combination there.
 
 Results are merged into ``models/bench.json``::
 
@@ -13,10 +22,11 @@ Results are merged into ``models/bench.json``::
                   "peak_rss_mb", "n"}, ...]}
 
 A new result replaces the stored one with the same model, backend and device; results for other
-combinations are kept. :func:`safety_ai.inference.backends.choose_backend` reads this file to pick
-the fastest backend. The returned :class:`BenchReport` holds this run's results plus the
-combinations that were skipped and why; :func:`load_bench` reads the merged file and
-:func:`render_markdown` renders either as a Markdown table.
+combinations are kept, except those of models that are no longer registered, which are dropped.
+:func:`safety_ai.inference.backends.choose_backend` reads this file to pick the fastest backend.
+The returned :class:`BenchReport` holds this run's results plus the combinations that were
+skipped and why; :func:`load_bench` reads the merged file and :func:`render_markdown` renders
+either as a Markdown table.
 
 Public API: :func:`bench`, :func:`load_bench`, :func:`merge_results`, :func:`write_bench`,
 :func:`render_markdown`, :func:`percentile`, :func:`host_info`, :func:`default_bench_images`,
@@ -25,13 +35,18 @@ Public API: :func:`bench`, :func:`load_bench`, :func:`merge_results`, :func:`wri
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import json
 import logging
 import math
+import multiprocessing
 import platform
+import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
+from dataclasses import dataclass
+from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any, Final
 
@@ -54,6 +69,7 @@ from safety_ai.inference.backends import (
 from safety_ai.inference.registry import ModelRegistry, UtcTimestamp, atomic_write_text
 
 __all__ = [
+    "CHILD_OVERHEAD_S",
     "WARMUP_RUNS",
     "BenchHost",
     "BenchReport",
@@ -72,6 +88,9 @@ __all__ = [
 _LOG = logging.getLogger(__name__)
 
 WARMUP_RUNS: Final[int] = 5
+CHILD_OVERHEAD_S: Final[float] = 600.0
+"""Time an isolated combination may take on top of ``seconds`` (start-up, loading, warm-up)."""
+_JOIN_TIMEOUT_S: Final[float] = 30.0
 _MB: Final[float] = float(1 << 20)
 _BENCH_CONF: Final[float] = 0.25
 
@@ -224,13 +243,25 @@ def merge_results(existing: Sequence[BenchResult], new: Sequence[BenchResult]) -
     return [merged[k] for k in sorted(merged)]
 
 
-def write_bench(path: Path, report: BenchReport) -> BenchReport:
-    """Merge ``report`` into the file at ``path`` atomically and return what was written."""
+def write_bench(
+    path: Path, report: BenchReport, *, keep_models: Collection[str] | None = None
+) -> BenchReport:
+    """Merge ``report`` into the file at ``path`` atomically and return what was written.
+
+    With ``keep_models`` (the registry's entry names), stored results of any other model are
+    dropped, so the file never keeps numbers of models that no longer exist.
+    """
     previous = load_bench(path)
+    stored = previous.results if previous else []
+    if keep_models is not None:
+        dropped = sorted({r.model for r in stored if r.model not in keep_models})
+        if dropped:
+            _LOG.info("dropping benchmark results of unregistered models: %s", ", ".join(dropped))
+        stored = [r for r in stored if r.model in keep_models]
     merged = BenchReport(
         created_at=report.created_at,
         host=report.host,
-        results=merge_results(previous.results if previous else [], report.results),
+        results=merge_results(stored, report.results),
     )
     payload = merged.model_dump(mode="json", exclude={"skipped"})
     atomic_write_text(Path(path), json.dumps(payload, indent=2) + "\n")
@@ -285,6 +316,138 @@ def _release_device_memory(device: str) -> None:
         torch.cuda.empty_cache()
 
 
+def _torch_threads() -> int | None:
+    """torch's intra-op thread count, when torch is already imported (never imports it)."""
+    torch = sys.modules.get("torch")
+    return int(torch.get_num_threads()) if torch is not None else None
+
+
+def _restore_torch_threads(count: int | None) -> None:
+    """Undo a thread-count change made while a combination ran (see the module docstring)."""
+    torch = sys.modules.get("torch")
+    if count is not None and torch is not None and int(torch.get_num_threads()) != count:
+        torch.set_num_threads(count)
+
+
+@dataclass(frozen=True, slots=True)
+class _Job:
+    """One model x backend measurement; picklable, so it can run in a spawned process."""
+
+    registry_path: Path
+    model: str
+    backend: str
+    device: str
+    task: str
+    imgsz: int
+    seconds: float
+    warmup: int
+    half: bool
+    frames: tuple[ImageArray, ...]
+
+
+def _measure_job(
+    job: _Job,
+    *,
+    loader: ModelLoader | None,
+    timer: Callable[[], float],
+    rss_mb: Callable[[], float],
+) -> BenchResult:
+    """Load the job's model on its backend and measure it in this process."""
+    registry = ModelRegistry(job.registry_path)
+    entry = registry.resolve(job.model)
+    loaded = load_model(
+        entry, registry, backend=job.backend, device=job.device, task=job.task, loader=loader
+    )
+    kwargs: dict[str, Any] = {
+        "imgsz": job.imgsz,
+        "device": job.device,
+        "conf": _BENCH_CONF,
+        "verbose": False,
+        **precision_kwargs(job.device, job.backend, job.half),
+    }
+    latencies, wall, peak = _measure(
+        loaded.model,
+        job.frames,
+        kwargs,
+        seconds=job.seconds,
+        warmup=job.warmup,
+        timer=timer,
+        rss_mb=rss_mb,
+    )
+    del loaded
+    _release_device_memory(job.device)
+    return BenchResult(
+        model=job.model,
+        backend=job.backend,
+        device=job.device,
+        imgsz=job.imgsz,
+        fps=round(len(latencies) / wall, 2) if wall > 0 else 0.0,
+        p50_ms=round(percentile(latencies, 50), 2),
+        p95_ms=round(percentile(latencies, 95), 2),
+        peak_rss_mb=round(peak, 1),
+        n=len(latencies),
+    )
+
+
+def _child_main(conn: Connection, job: _Job) -> None:
+    """Entry point of a spawned benchmark process: measure ``job``, send the result or error."""
+    try:
+        try:
+            result = _measure_job(job, loader=None, timer=time.perf_counter, rss_mb=_process_rss_mb)
+            message: tuple[str, Any] = ("ok", result.model_dump(mode="json"))
+        except Exception as exc:  # reported to the parent, which raises it there
+            message = ("error", f"{type(exc).__name__}: {exc}")
+        with contextlib.suppress(OSError):  # the parent stopped waiting and closed its end
+            conn.send(message)
+    finally:
+        conn.close()
+
+
+def _stop_process(process: Any) -> None:
+    """Join a benchmark process, terminating it when it does not exit by itself."""
+    process.join(timeout=_JOIN_TIMEOUT_S)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=_JOIN_TIMEOUT_S)
+
+
+def _run_isolated(job: _Job, timeout_s: float) -> BenchResult:
+    """Measure ``job`` in a freshly spawned process (spawn context on every platform).
+
+    Raises:
+        TimeoutError: When the process sends no result within ``timeout_s``.
+        RuntimeError: When the measurement failed or the process died without a result.
+    """
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_child_main,
+        args=(sender, job),
+        name=f"bench-{job.model}-{job.backend}",
+        daemon=True,
+    )
+    process.start()
+    sender.close()
+    try:
+        if not receiver.poll(timeout_s):
+            raise TimeoutError(
+                f"bench of {job.model}/{job.backend} sent no result within {timeout_s:.0f} s"
+            )
+        try:
+            status, payload = receiver.recv()
+        except EOFError:
+            status, payload = "error", "the benchmark process exited without a result"
+    finally:
+        receiver.close()
+        _stop_process(process)
+    if status != "ok":
+        raise RuntimeError(
+            f"bench of {job.model}/{job.backend} on {job.device} failed "
+            f"(exit code {process.exitcode}): {payload}"
+        )
+    return BenchResult.model_validate(payload)
+
+
 def bench(  # noqa: PLR0917  (positional order fixed by the bench API contract)
     models: Sequence[str],
     backends: Sequence[str] | None,
@@ -297,8 +460,9 @@ def bench(  # noqa: PLR0917  (positional order fixed by the bench API contract)
     bench_path: Path | None = None,
     half: bool = True,
     warmup: int = WARMUP_RUNS,
+    isolate: bool = True,
     loader: ModelLoader | None = None,
-    timer: Callable[[], float] = time.perf_counter,
+    timer: Callable[[], float] | None = None,
     rss_mb: Callable[[], float] | None = None,
     host: BenchHost | None = None,
     clock: Clock | None = None,
@@ -317,9 +481,10 @@ def bench(  # noqa: PLR0917  (positional order fixed by the bench API contract)
         bench_path: Output file (default: ``bench.json`` next to the registry).
         half: FP16 on CUDA, as at runtime.
         warmup: Untimed inferences before measuring.
-        loader: Model loader (tests inject fakes).
-        timer: High-resolution timer in seconds.
-        rss_mb: Resident-set-size probe in MB (default: this process via psutil).
+        isolate: Run each combination in its own spawned process (see the module docstring).
+        loader: Model loader (test hook; needs ``isolate=False``).
+        timer: High-resolution timer in seconds (test hook; needs ``isolate=False``).
+        rss_mb: Resident-set-size probe in MB (test hook; needs ``isolate=False``).
         host: Host description (default: :func:`host_info`).
         clock: Source of ``created_at``.
 
@@ -327,7 +492,10 @@ def bench(  # noqa: PLR0917  (positional order fixed by the bench API contract)
         This run's results and skips; the file holds the merged results.
 
     Raises:
-        ValueError: For non-positive ``seconds``, a bad ``imgsz`` or no images.
+        ValueError: For non-positive ``seconds``, a bad ``imgsz``, no images, or test hooks
+            combined with ``isolate``.
+        TimeoutError: When an isolated combination hangs past ``seconds + CHILD_OVERHEAD_S``.
+        RuntimeError: When an isolated combination fails (the message carries its error).
     """
     if seconds <= 0:
         raise ValueError("seconds must be positive")
@@ -335,9 +503,10 @@ def bench(  # noqa: PLR0917  (positional order fixed by the bench API contract)
         raise ValueError("imgsz must be a positive multiple of 32")
     if not images:
         raise ValueError("at least one benchmark image is needed")
-    frames = [_as_image(image) for image in images]
+    if isolate and (loader is not None or timer is not None or rss_mb is not None):
+        raise ValueError("loader, timer and rss_mb are in-process test hooks; pass isolate=False")
+    frames = tuple(_as_image(image) for image in images)
     resolved = resolve_device(device)
-    probe = rss_mb if rss_mb is not None else _process_rss_mb
     results: list[BenchResult] = []
     skipped: list[BenchSkip] = []
     for name in models:
@@ -347,7 +516,6 @@ def bench(  # noqa: PLR0917  (positional order fixed by the bench API contract)
                 BenchSkip(model=entry.name, backend=entry.format, reason="not an image model")
             )
             continue
-        task = "pose" if entry.role == "pose" else "detect"
         available = available_backends(entry, resolved, root=registry.root)
         wanted = list(backends) if backends is not None else available
         for backend in wanted:
@@ -356,38 +524,31 @@ def bench(  # noqa: PLR0917  (positional order fixed by the bench API contract)
                 skipped.append(BenchSkip(model=entry.name, backend=backend, reason=reason))
                 _LOG.warning("skipping %s/%s: %s", entry.name, backend, reason)
                 continue
-            loaded = load_model(
-                entry, registry, backend=backend, device=resolved, task=task, loader=loader
-            )
-            kwargs: dict[str, Any] = {
-                "imgsz": imgsz,
-                "device": resolved,
-                "conf": _BENCH_CONF,
-                "verbose": False,
-                **precision_kwargs(resolved, backend, half),
-            }
-            latencies, wall, peak = _measure(
-                loaded.model,
-                frames,
-                kwargs,
-                seconds=seconds,
-                warmup=warmup,
-                timer=timer,
-                rss_mb=probe,
-            )
-            del loaded
-            _release_device_memory(resolved)
-            result = BenchResult(
+            job = _Job(
+                registry_path=registry.path.absolute(),
                 model=entry.name,
                 backend=backend,
                 device=resolved,
+                task="pose" if entry.role == "pose" else "detect",
                 imgsz=imgsz,
-                fps=round(len(latencies) / wall, 2) if wall > 0 else 0.0,
-                p50_ms=round(percentile(latencies, 50), 2),
-                p95_ms=round(percentile(latencies, 95), 2),
-                peak_rss_mb=round(peak, 1),
-                n=len(latencies),
+                seconds=seconds,
+                warmup=warmup,
+                half=half,
+                frames=frames,
             )
+            if isolate:
+                result = _run_isolated(job, seconds + CHILD_OVERHEAD_S)
+            else:
+                threads = _torch_threads()
+                try:
+                    result = _measure_job(
+                        job,
+                        loader=loader,
+                        timer=timer or time.perf_counter,
+                        rss_mb=rss_mb or _process_rss_mb,
+                    )
+                finally:
+                    _restore_torch_threads(threads)
             _LOG.info(
                 "bench %s/%s on %s: %.1f FPS, p50 %.1f ms, p95 %.1f ms, peak RSS %.0f MB",
                 result.model,
@@ -406,7 +567,9 @@ def bench(  # noqa: PLR0917  (positional order fixed by the bench API contract)
         skipped=skipped,
     )
     write_bench(
-        bench_path if bench_path is not None else registry.path.with_name("bench.json"), report
+        bench_path if bench_path is not None else registry.path.with_name("bench.json"),
+        report,
+        keep_models=set(registry.names()),
     )
     return report
 

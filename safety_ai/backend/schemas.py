@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Annotated, Any, Final, Literal, cast
 
@@ -23,6 +24,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PlainSerializer,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -34,6 +36,7 @@ __all__ = [
     "DETAILS_BY_TYPE",
     "EVENT_TYPES",
     "PPE_CODE_VALUES",
+    "STRICT_ZONES",
     "Box",
     "BoxLabel",
     "CameraConfig",
@@ -211,7 +214,14 @@ FrameSize = tuple[PosInt, PosInt]
 class StrictModel(BaseModel):
     """Base for outgoing messages: unknown fields are rejected, instances are immutable."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+    # Defaults are always serialized, so the serialization JSON Schema lists them as required
+    # (the integration suite compares these schemas with the website's, spec 8.1).
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        validate_default=True,
+        json_schema_serialization_defaults_required=True,
+    )
 
 
 class LenientModel(BaseModel):
@@ -409,16 +419,32 @@ class EventAccepted(LenientModel):
 # --------------------------------------------------------------------------------------------
 
 
-class HeartbeatExtra(StrictModel):
-    """``extra`` object of a heartbeat."""
+class HeartbeatExtra(BaseModel):
+    """``extra`` object of a heartbeat.
+
+    The integration contract (4.2) makes ``extra`` free-form: the fields below are the ones this
+    module always sends, additional keys are allowed. ``supported_ppe`` is the contract's additive
+    extension — the PPE codes the loaded detector can see (derived from its class map). When it is
+    unknown (None) the key is left out of the JSON: the contract asks both sides to tolerate the
+    key being absent, not ``null`` (DECISIONS.md D-035).
+    """
+
+    model_config = ConfigDict(extra="allow", frozen=True, validate_default=True)
 
     device: str = Field(min_length=1)
     backend: str = Field(min_length=1)
     queue_depth: NonNegInt
     frames_dropped: NonNegInt
     stream: StreamStateName
-    model_family: str = Field(min_length=1)
-    """Detector family chosen at startup (``yolo26`` or ``yolo11``, spec 5.3)."""
+    model_family: str | None = Field(
+        default=None, min_length=1, exclude_if=lambda value: value is None
+    )
+    """Detector family chosen at startup (``yolo26`` or ``yolo11``, spec 5.3); the worker always
+    sends it, but the contract's free-form ``extra`` (4.2 example) does not require it."""
+    supported_ppe: list[PpeCode] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    """PPE codes the loaded model can detect (contract 4.2 extension); None when unknown."""
 
 
 class HeartbeatPayload(StrictModel):
@@ -662,6 +688,17 @@ def _clamp_polygon(value: Any) -> Any:
     return value
 
 
+def _none_to_default(default: Any) -> Any:
+    """Before-validator factory: a JSON null becomes ``default`` (a fresh copy for containers)."""
+
+    def convert(value: Any) -> Any:
+        if value is None:
+            return default() if callable(default) else default
+        return value
+
+    return convert
+
+
 class Zone(LenientModel):
     """A zone polygon (normalized to the frame) with its rules; ``type`` is only a UI hint."""
 
@@ -671,8 +708,10 @@ class Zone(LenientModel):
     polygon: Annotated[list[tuple[float, float]], BeforeValidator(_clamp_polygon)] = Field(
         min_length=3
     )
-    rules: ZoneRules = Field(default_factory=ZoneRules)
-    enabled: bool = True
+    rules: Annotated[ZoneRules, BeforeValidator(_none_to_default(dict))] = Field(
+        default_factory=ZoneRules
+    )
+    enabled: Annotated[bool, BeforeValidator(_none_to_default(True))] = True
 
 
 class CameraInfo(LenientModel):
@@ -692,15 +731,55 @@ class Thresholds(LenientModel):
     min_confidence: Unit | None = None
 
 
+STRICT_ZONES: Final[str] = "strict_zones"
+"""Validation-context key: ``context={STRICT_ZONES: True}`` makes an invalid zone an error.
+
+Configurations received from the website are lenient (an invalid zone is skipped with a WARNING,
+:func:`_drop_invalid_zones`); files written by the operator (``--zones`` files, scenario YAML)
+are validated with this flag so a typo fails at startup with a readable message instead of
+silently removing a zone (DECISIONS.md D-034).
+"""
+
+
+def _strict_zones(info: ValidationInfo) -> bool:
+    context = info.context
+    return isinstance(context, Mapping) and bool(context.get(STRICT_ZONES))
+
+
+def _drop_invalid_zones(value: Any, info: ValidationInfo) -> Any:
+    """Keep the valid zones of a config; an invalid zone is skipped with a WARNING.
+
+    One malformed zone (e.g. a polygon point outside 0..1) must not take the whole camera offline:
+    the other zones and the thresholds still apply. ``null`` means no zones. With the
+    :data:`STRICT_ZONES` validation context an invalid zone is reported as an error instead.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list) or _strict_zones(info):
+        return value
+    kept: list[Any] = []
+    for index, raw in enumerate(value):
+        try:
+            kept.append(Zone.model_validate(raw))
+        except ValueError as exc:
+            zone_id = raw.get("id") if isinstance(raw, dict) else None
+            _log.warning("ignoring invalid zone #%d (%s): %s", index, zone_id, exc)
+    return kept
+
+
 class CameraConfig(LenientModel):
     """Response of ``GET /api/v1/ingest/config/{camera_id}`` (one element of the list endpoint)."""
 
     camera: CameraInfo
     frame_size_hint: FrameSize | None = None
-    thresholds: Thresholds = Field(default_factory=Thresholds)
-    ppe_types: PpeList = Field(default_factory=_all_ppe_codes)
-    zones: list[Zone] = Field(default_factory=list)
-    version: int = 0
+    thresholds: Annotated[Thresholds, BeforeValidator(_none_to_default(dict))] = Field(
+        default_factory=Thresholds
+    )
+    ppe_types: Annotated[PpeList, BeforeValidator(_none_to_default(_all_ppe_codes))] = Field(
+        default_factory=_all_ppe_codes
+    )
+    zones: Annotated[list[Zone], BeforeValidator(_drop_invalid_zones)] = Field(default_factory=list)
+    version: Annotated[int, BeforeValidator(_none_to_default(0))] = 0
     updated_at: datetime | None = None
 
     @field_validator("updated_at")

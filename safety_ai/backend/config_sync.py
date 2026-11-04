@@ -14,6 +14,11 @@ caches the last good configuration of each camera in ``<cache_dir>/config_<camer
 - :meth:`ConfigSync.start` runs the periodic refresh in a daemon thread. It measures the interval
   on the injected clock and waits on an event in short slices, so :meth:`ConfigSync.stop` and
   :meth:`ConfigSync.request_refresh` interrupt the wait at once and a ``FakeClock`` can drive it.
+- HTTP 401/403 (a wrong or revoked API key) is never fatal: the readable
+  :func:`~.rest_client.auth_error_message` is logged at ERROR at most once per
+  ``auth_log_interval_s`` (60 s), the cameras keep their current (or cached) configuration,
+  :attr:`ConfigSync.unauthorized` is True and the thread retries every ``auth_retry_s`` (10 s)
+  until the key is accepted, then returns to ``refresh_s``.
 
 Camera ids may contain characters that are invalid in Windows file names (``:``), so the cache
 file name percent-encodes everything but URL-unreserved characters (``cam-1`` -> ``config_cam-1``).
@@ -23,11 +28,12 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, Literal, Protocol
 
-from safety_ai.backend.rest_client import ENDPOINT_CONFIG, BackendError
+from safety_ai.backend.rest_client import ENDPOINT_CONFIG, BackendError, auth_error_message
 from safety_ai.backend.schemas import CameraConfig
 from safety_ai.backend.spool import atomic_write_bytes, safe_file_component
 from safety_ai.clock import Clock
@@ -40,6 +46,17 @@ ConfigOrigin = Literal["backend", "cache"]
 """Where a camera's current configuration came from."""
 
 _ALL: Final[str] = "*"
+
+_FetchProblem = Literal["unreachable", "unauthorized"]
+"""Why a fetch of every camera stopped early (None: the backend answered)."""
+
+_PROBLEM_TEXT: Final[Mapping[_FetchProblem | None, str]] = MappingProxyType(
+    {
+        "unreachable": "unreachable",
+        "unauthorized": "rejected the API key",
+        None: "did not provide it",
+    }
+)
 
 
 class ConfigSource(Protocol):
@@ -65,9 +82,11 @@ class ConfigSync:
         clock: Clock that measures the refresh interval.
         refresh_s: Seconds between two periodic refreshes.
         poll_s: Longest single wait of the background thread (the clock is re-read after it).
+        auth_retry_s: Seconds between two refreshes while the backend refuses the API key.
+        auth_log_interval_s: At most one refused-key ERROR line per this many seconds.
 
     Raises:
-        ValueError: When ``refresh_s`` or ``poll_s`` is not positive.
+        ValueError: When ``refresh_s``, ``poll_s`` or ``auth_retry_s`` is not positive.
     """
 
     def __init__(
@@ -80,12 +99,18 @@ class ConfigSync:
         clock: Clock,
         refresh_s: float = 60.0,
         poll_s: float = 1.0,
+        auth_retry_s: float = 10.0,
+        auth_log_interval_s: float = 60.0,
     ) -> None:
         """Store the settings; nothing is fetched until :meth:`load_initial` or a refresh."""
         if refresh_s <= 0:
             raise ValueError("refresh_s must be > 0")
         if poll_s <= 0:
             raise ValueError("poll_s must be > 0")
+        if auth_retry_s <= 0:
+            raise ValueError("auth_retry_s must be > 0")
+        if auth_log_interval_s < 0:
+            raise ValueError("auth_log_interval_s must be >= 0")
         self._client = client
         self._cache_dir = Path(cache_dir)
         self._camera_ids: tuple[str, ...] = tuple(dict.fromkeys(camera_ids))
@@ -94,6 +119,11 @@ class ConfigSync:
         self._clock = clock
         self._refresh_s = refresh_s
         self._poll_s = poll_s
+        self._auth_retry_s = auth_retry_s
+        self._auth_log_interval_s = auth_log_interval_s
+        self._unauthorized = False
+        self._auth_last_log: float | None = None
+        self._auth_suppressed = 0
         self._lock = threading.Lock()
         self._refresh_lock = threading.RLock()
         self._current: dict[str, CameraConfig] = {}
@@ -119,6 +149,12 @@ class ConfigSync:
         """True while the background refresh thread is alive."""
         thread = self._thread
         return thread is not None and thread.is_alive()
+
+    @property
+    def unauthorized(self) -> bool:
+        """True while the backend refuses the API key (the last config request got 401/403)."""
+        with self._lock:
+            return self._unauthorized
 
     def cached(self, camera_id: str) -> CameraConfig | None:
         """The current (last good) configuration of ``camera_id``, or None."""
@@ -168,7 +204,7 @@ class ConfigSync:
             ``{camera_id: config}`` for the cameras that have a configuration.
         """
         with self._refresh_lock:
-            found, reachable = self._fetch_all()
+            found, problem = self._fetch_all()
             result: dict[str, CameraConfig] = {}
             for camera_id in self._camera_ids:
                 config = found.get(camera_id)
@@ -180,7 +216,7 @@ class ConfigSync:
                     _log.warning(
                         "camera %s: no configuration (backend %s, no usable cache at %s)",
                         camera_id,
-                        "unreachable" if not reachable else "did not provide it",
+                        _PROBLEM_TEXT[problem],
                         self.cache_path(camera_id),
                         extra={"camera_id": camera_id},
                     )
@@ -262,16 +298,24 @@ class ConfigSync:
                 _log.warning("config sync thread is still busy after %.1f s", timeout_s)
         self._thread = None
 
+    def _interval(self) -> float:
+        """The next refresh delay: ``auth_retry_s`` while the key is refused, else ``refresh_s``."""
+        return self._auth_retry_s if self.unauthorized else self._refresh_s
+
     def _run(self) -> None:
-        next_due = self._clock.monotonic() + self._refresh_s
+        next_due = self._clock.monotonic() + self._interval()
         while not self._stop.is_set():
             try:
                 if self._has_requests():
                     if self._process_requests():
-                        next_due = self._clock.monotonic() + self._refresh_s
+                        next_due = self._clock.monotonic() + self._interval()
+                    elif self.unauthorized:
+                        next_due = min(next_due, self._clock.monotonic() + self._auth_retry_s)
                 elif self._clock.monotonic() >= next_due:
+                    # Set before the refresh: an unexpected error keeps the regular pace.
                     next_due = self._clock.monotonic() + self._refresh_s
                     self.refresh(None)
+                    next_due = self._clock.monotonic() + self._interval()
             except Exception:
                 _log.exception("configuration refresh failed")
             remaining = next_due - self._clock.monotonic()
@@ -300,17 +344,25 @@ class ConfigSync:
 
     # ------------------------------------------------------------------ internals
 
-    def _fetch_all(self) -> tuple[dict[str, CameraConfig], bool]:
-        """Fetch the configurations of all local cameras; returns them and reachability."""
+    def _fetch_all(self) -> tuple[dict[str, CameraConfig], _FetchProblem | None]:
+        """Fetch the configurations of all local cameras.
+
+        Returns:
+            The configurations found and why fetching stopped early: ``unreachable`` (no
+            response) or ``unauthorized`` (401/403, the key is refused for every camera alike);
+            None when the backend answered every request.
+        """
         found: dict[str, CameraConfig] = {}
         try:
             configs = self._client.get_all_configs()
         except BackendError as exc:
-            if exc.unreachable:
+            problem = _problem_of(exc)
+            if problem is not None:
                 self._note_failure(None, exc)
-                return found, False
+                return found, problem
             _log.info("config list request failed (%s); requesting each camera instead", exc)
         else:
+            self._note_key_accepted()
             for config in configs:
                 camera_id = config.camera.id
                 if camera_id in self._known and camera_id not in found:
@@ -323,9 +375,10 @@ class ConfigSync:
                 found[camera_id] = self._fetch_one(camera_id)
             except BackendError as exc:
                 self._note_failure(camera_id, exc)
-                if exc.unreachable:
-                    return found, False
-        return found, True
+                problem = _problem_of(exc)
+                if problem is not None:
+                    return found, problem
+        return found, None
 
     def _fetch_one(self, camera_id: str) -> CameraConfig:
         """Fetch one camera's configuration; raises :class:`BackendError`."""
@@ -377,24 +430,83 @@ class ConfigSync:
             _log.exception("on_config callback failed for camera %s", camera_id)
 
     def _note_failure(self, camera_id: str | None, exc: BackendError) -> None:
-        """Log a failure at WARNING when it is new (or its cause changed), else at DEBUG."""
+        """Log a failure at WARNING when it is new (or its cause changed), else at DEBUG.
+
+        A refused API key is logged with the readable refused-key line at ERROR instead, at
+        most once per ``auth_log_interval_s`` whatever the camera.
+        """
         target = camera_id if camera_id is not None else _ALL
         key = f"{exc.reason}:{exc.status_code}"
         with self._lock:
             repeated = self._failures.get(target) == key
             self._failures[target] = key
+        if exc.unauthorized:
+            self._note_key_refused(exc)
+            return
         subject = f"camera {camera_id}" if camera_id is not None else "all cameras"
         if repeated:
             _log.debug("configuration of %s still unavailable: %s", subject, exc)
         else:
             _log.warning("configuration of %s unavailable from the backend: %s", subject, exc)
 
+    def _note_key_refused(self, exc: BackendError) -> None:
+        """Mark the key refused and log the readable ERROR line (rate-limited)."""
+        now = self._clock.monotonic()
+        with self._lock:
+            self._unauthorized = True
+            limited = (
+                self._auth_last_log is not None
+                and now - self._auth_last_log < self._auth_log_interval_s
+            )
+            if limited:
+                self._auth_suppressed += 1
+                suppressed = 0
+            else:
+                suppressed = self._auth_suppressed
+                self._auth_last_log = now
+                self._auth_suppressed = 0
+        if limited:
+            _log.debug("configuration request refused again: %s", exc)
+            return
+        note = f" ({suppressed} similar refusals since the last report)" if suppressed else ""
+        _log.error(
+            "%s; the cameras keep their current or cached configuration and the request is "
+            "retried every %g s%s",
+            auth_error_message(exc.status_code, exc.endpoint),
+            self._auth_retry_s,
+            note,
+        )
+
+    def _note_key_accepted(self) -> None:
+        """A config request succeeded: the backend accepts the key (again)."""
+        with self._lock:
+            recovered = self._unauthorized
+            self._unauthorized = False
+            if recovered:
+                self._auth_last_log = None
+                self._auth_suppressed = 0
+        if recovered:
+            _log.info(
+                "configuration requests are authorized again; refreshing every %g s",
+                self._refresh_s,
+            )
+
     def _note_success(self, camera_id: str) -> None:
+        self._note_key_accepted()
         with self._lock:
             recovered = self._failures.pop(camera_id, None) is not None
             recovered = self._failures.pop(_ALL, None) is not None or recovered
         if recovered:
             _log.info("configuration of camera %s is available from the backend again", camera_id)
+
+
+def _problem_of(exc: BackendError) -> _FetchProblem | None:
+    """Failures that affect every camera alike (no response, refused key) stop a fetch early."""
+    if exc.unreachable:
+        return "unreachable"
+    if exc.unauthorized:
+        return "unauthorized"
+    return None
 
 
 def _first(exc: Exception) -> str:

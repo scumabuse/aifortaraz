@@ -18,17 +18,21 @@ import pytest
 
 from safety_ai import __version__
 from safety_ai.backend.rest_client import (
+    AUTH_ERROR_STATUSES,
     ENDPOINT_CONFIG,
     ENDPOINT_CONFIG_ALL,
+    ENDPOINT_DESCRIPTIONS,
     ENDPOINT_HEARTBEAT,
     ENDPOINT_PATCH_EVENT,
     ENDPOINT_POST_EVENT,
     ENDPOINT_STATS,
+    ENDPOINT_WS,
     BackendError,
     PatchOutcome,
     PostOutcome,
     RequestOutcome,
     RestClient,
+    auth_error_message,
     classify_status,
     parse_retry_after,
 )
@@ -288,8 +292,8 @@ def test_invalid_timeouts_are_rejected(timeout: float) -> None:
         (502, None, "retry", None, False),
         (503, {"detail": "maintenance"}, "retry", None, False),
         (400, {"detail": "bad request"}, "client_error", None, False),
-        (401, None, "client_error", None, False),
-        (403, None, "client_error", None, False),
+        (401, None, "unauthorized", None, False),
+        (403, None, "unauthorized", None, False),
         (404, None, "client_error", None, False),
         (405, None, "client_error", None, False),
         (302, None, "retry", None, False),
@@ -356,7 +360,8 @@ def test_accepted_without_id_is_logged(
         (429, "retry"),
         (503, "retry"),
         (400, "client_error"),
-        (403, "client_error"),
+        (401, "unauthorized"),
+        (403, "unauthorized"),
     ],
 )
 def test_patch_status_classification(
@@ -375,6 +380,11 @@ def test_classify_status_table() -> None:
     assert classify_status(404, method="GET") == "client_error"
     assert classify_status(101, method="GET") == "retry"
     assert classify_status(599, method="POST") == "retry"
+    # A refused API key is never a client bug, whatever the method (spec 6.2.1).
+    for method in ("GET", "POST", "PATCH"):
+        assert classify_status(401, method=method) == "unauthorized"
+        assert classify_status(403, method=method) == "unauthorized"
+    assert set(AUTH_ERROR_STATUSES) == {401, 403}
 
 
 # ---------------------------------------------------------------------------- Retry-After
@@ -725,3 +735,150 @@ def test_outcome_descriptions() -> None:
     assert text.startswith("HTTP 400 (client_error): a b")
     assert len(text) < 340
     assert RequestOutcome(kind="ok", status_code=204).describe() == "HTTP 204 (ok)"
+
+
+# ---------------------------------------------------------------------------- refused API key
+
+
+def test_auth_error_message_names_the_endpoint_and_never_the_key() -> None:
+    expected = (
+        "backend rejected the API key (HTTP 401) for POST /api/v1/ingest/events — check "
+        "SAFETY_AI_API_KEY / the website's AI key"
+    )
+    assert auth_error_message(401, ENDPOINT_POST_EVENT) == expected
+    assert auth_error_message(None, ENDPOINT_POST_EVENT) == expected
+    assert "(HTTP 403) for GET /api/v1/ingest/config/{camera_id} —" in auth_error_message(
+        403, ENDPOINT_CONFIG
+    )
+    assert "for WS /ws/ingest —" in auth_error_message(403, ENDPOINT_WS)
+    assert "for GET /custom —" in auth_error_message(401, "GET /custom")
+    names = (
+        ENDPOINT_POST_EVENT,
+        ENDPOINT_PATCH_EVENT,
+        ENDPOINT_HEARTBEAT,
+        ENDPOINT_STATS,
+        ENDPOINT_CONFIG,
+        ENDPOINT_CONFIG_ALL,
+        ENDPOINT_WS,
+    )
+    assert set(ENDPOINT_DESCRIPTIONS) == set(names)
+
+
+def test_refused_key_state_is_tracked_and_cleared_by_a_2xx(
+    make_client: Callable[..., RestClient],
+    fake_clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    statuses = iter([401, 503, 403, 200])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(next(statuses), json={"error": {"code": "x", "message": "y"}})
+
+    client = make_client(handler)
+    assert not client.unauthorized
+    assert client.last_auth_error_at is None and client.auth_error_count == 0
+    assert client.last_auth_error_status is None
+    with caplog.at_level(logging.INFO, logger="safety_ai.backend.rest_client"):
+        client.post_heartbeat(heartbeat())
+        first_error_at = fake_clock.now_utc()
+        assert client.unauthorized and client.last_auth_error_at == first_error_at
+        fake_clock.advance(5)
+        client.post_heartbeat(heartbeat())  # a 503 says nothing about the key
+        assert client.unauthorized and client.auth_error_count == 1
+        fake_clock.advance(5)
+        client.post_heartbeat(heartbeat())
+        assert client.auth_error_count == 2 and client.last_auth_error_status == 403
+        assert client.last_auth_error_at == fake_clock.now_utc() != first_error_at
+        assert client.post_heartbeat(heartbeat())
+    assert not client.unauthorized
+    assert client.auth_error_count == 2  # the history stays available
+    assert "backend accepts the API key again (HTTP 200)" in caplog.text
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_ephemeral_posts_log_the_readable_key_error_once_per_minute(
+    make_client: Callable[..., RestClient],
+    fake_clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+    status: int,
+) -> None:
+    body = {"error": {"code": "unauthorized", "message": "API key invalid", "details": {}}}
+    client = make_client(respond(status, body))
+    with caplog.at_level(logging.DEBUG, logger="safety_ai.backend.rest_client"):
+        assert client.post_heartbeat(heartbeat()) is False
+        fake_clock.advance(5)
+        assert client.post_heartbeat(heartbeat()) is False
+        assert client.post_stats(stats()) is False  # same cause: one shared limit
+        fake_clock.advance(55)
+        assert client.post_stats(stats()) is False
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert [r.getMessage() for r in errors] == [
+        f"backend rejected the API key (HTTP {status}) for POST /api/v1/ingest/heartbeat — "
+        "check SAFETY_AI_API_KEY / the website's AI key; heartbeats and stats are dropped "
+        "until the key is accepted",
+        f"backend rejected the API key (HTTP {status}) for POST /api/v1/ingest/stats — check "
+        "SAFETY_AI_API_KEY / the website's AI key; heartbeats and stats are dropped until the "
+        "key is accepted (2 similar failures suppressed)",
+    ]
+    assert all(r.levelno != logging.WARNING for r in caplog.records)  # not a generic failure
+    assert API_KEY not in caplog.text
+    assert client.unauthorized and client.auth_error_count == 4
+
+
+def test_a_recovered_key_logs_the_next_refusal_at_once(
+    make_client: Callable[..., RestClient],
+    fake_clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    statuses = iter([401, 200, 401])
+    client = make_client(lambda request: httpx.Response(next(statuses)))
+    with caplog.at_level(logging.ERROR, logger="safety_ai.backend.rest_client"):
+        client.post_heartbeat(heartbeat())
+        fake_clock.advance(1)
+        client.post_heartbeat(heartbeat())
+        fake_clock.advance(1)
+        client.post_heartbeat(heartbeat())  # the key was revoked again: report it now
+    assert sum("backend rejected the API key" in r.getMessage() for r in caplog.records) == 2
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_refused_events_are_unauthorized_outcomes_without_a_log_line(
+    make_client: Callable[..., RestClient],
+    make_payload: Callable[..., EventPayload],
+    jpeg: bytes,
+    caplog: pytest.LogCaptureFixture,
+    status: int,
+) -> None:
+    calls: list[str] = []
+    client = make_client(respond(status), on_request=lambda e, s, o: calls.append(o))
+    with caplog.at_level(logging.WARNING, logger="safety_ai.backend.rest_client"):
+        post = client.post_event(make_payload(), jpeg)
+        patch = client.patch_event("cam-1-1-1-custom", datetime.now(timezone.utc))
+    for outcome in (post, patch):
+        assert outcome.kind == "unauthorized" and outcome.status_code == status
+        assert not outcome.accepted
+        assert outcome.describe().startswith(f"HTTP {status} (unauthorized)")
+    assert caplog.records == []  # the spool sender reports refused events itself
+    assert calls == ["unauthorized", "unauthorized"]
+    assert client.unauthorized
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_refused_config_requests_raise_unauthorized_backend_errors(
+    make_client: Callable[..., RestClient], status: int
+) -> None:
+    calls: list[tuple[str, str]] = []
+    client = make_client(respond(status), on_request=lambda e, s, o: calls.append((e, o)))
+    for request in (lambda: client.get_config("cam-1"), client.get_all_configs):
+        with pytest.raises(BackendError) as info:
+            request()
+        error = info.value
+        assert error.unauthorized and not error.unreachable
+        assert (error.reason, error.status_code) == ("status", status)
+    assert calls == [(ENDPOINT_CONFIG, "unauthorized"), (ENDPOINT_CONFIG_ALL, "unauthorized")]
+    clone = pickle.loads(
+        pickle.dumps(BackendError("x", endpoint="config", reason="status", status_code=status))
+    )
+    assert clone.unauthorized
+    assert not BackendError("x", endpoint="config", reason="status", status_code=404).unauthorized
+    assert not BackendError("x", endpoint="config", reason="connection").unauthorized

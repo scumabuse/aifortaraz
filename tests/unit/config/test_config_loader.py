@@ -1,4 +1,4 @@
-"""Tests of safety_ai.config.loader: layering, ${VAR} expansion, env overrides, calibration, errors."""
+"""Tests of safety_ai.config.loader: layers, ${VAR} expansion, env overrides, sidecars, errors."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from safety_ai.backend.schemas import CameraConfig
+from safety_ai.backend.schemas import STRICT_ZONES, CameraConfig
 from safety_ai.config import (
     AppSettings,
     ConfigError,
@@ -645,7 +645,8 @@ def test_yaml_syntax_error_with_line_and_column(tmp_path: Path) -> None:
 def test_unclosed_flow_sequence_error(tmp_path: Path) -> None:
     path = write(tmp_path / "c.yaml", "cameras: [1, 2\n")
     assert errors_of(path) == [
-        f"{path}: YAML syntax error at line 2, column 1: expected ',' or ']', but got '<stream end>'"
+        f"{path}: YAML syntax error at line 2, column 1: "
+        "expected ',' or ']', but got '<stream end>'"
     ]
 
 
@@ -695,7 +696,8 @@ def test_format_validation_error_uses_aliases_of_other_models() -> None:
         ],
     }
     with pytest.raises(ValidationError) as info:
-        CameraConfig.model_validate(config)
+        # Strict zones (as for operator-written files): the zone error is reported, not skipped.
+        CameraConfig.model_validate(config, context={STRICT_ZONES: True})
     assert format_validation_error(info.value, model=CameraConfig) == [
         "zones.0.rules.schedule.0.from: time '25:00' is out of range",
         "zones.0.rules.schedule.0.to: time '26:00' is out of range",

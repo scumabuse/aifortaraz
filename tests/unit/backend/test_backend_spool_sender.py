@@ -6,6 +6,7 @@ advances time instantly); thread tests use the real clock with short polling int
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import multiprocessing
@@ -162,7 +163,7 @@ def test_retries_back_off_exponentially_with_full_jitter(
     sender = make_sender()
     assert sender.flush(600.0) == 1
     times = [r.at for r in fake_backend.event_requests()]
-    gaps = [b - a for a, b in zip(times, times[1:], strict=False)]
+    gaps = [b - a for a, b in itertools.pairwise(times)]
     ceilings = [min(30.0, 0.5 * 2**n) for n in range(len(gaps))]
     assert len(gaps) >= 20
     for gap, ceiling in zip(gaps, ceilings, strict=True):
@@ -301,10 +302,10 @@ def test_client_errors_after_server_errors_still_get_three_attempts(
 ) -> None:
     spool.enqueue_post(make_payload(), jpeg)
     fake_backend.fail_next(*(httpx.Response(503) for _ in range(5)))
-    fake_backend.fail_next(httpx.Response(401), httpx.Response(403))
+    fake_backend.fail_next(httpx.Response(400), httpx.Response(405))
     sender = make_sender()
     assert sender.flush(120.0) == 0
-    assert len(fake_backend.event_requests()) == 8  # 5 x 503, 401, 403, then accepted
+    assert len(fake_backend.event_requests()) == 8  # 5 x 503, 400, 405, then accepted
     assert sender.sent_count == 1 and sender.rejected_count == 0
 
 
@@ -337,6 +338,186 @@ def test_as_json_mode_posts_json(
     received = fake_backend.event_requests()[0]
     assert received.content_type == "application/json"
     assert received.snapshot == jpeg
+
+
+# ---------------------------------------------------------------------------- refused API key
+
+
+def _auth_errors(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "backend rejected the API key" in r.getMessage()
+    ]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refused_key_keeps_events_pending_and_retries_every_10_s(
+    spool: EventSpool,
+    make_sender: Callable[..., SpoolSender],
+    fake_backend: Any,
+    make_payload: Callable[..., EventPayload],
+    jpeg: bytes,
+    rejected_dir: Path,
+    caplog: pytest.LogCaptureFixture,
+    status: int,
+) -> None:
+    payload = make_payload()
+    spool.enqueue_post(payload, jpeg)
+    spool.enqueue_patch("cam-1", payload.external_id, ENDED)
+    fake_backend.fail_camera("cam-1", status)
+    sender = make_sender()
+    with caplog.at_level(logging.DEBUG, logger="safety_ai.backend.spool"):
+        assert sender.flush(65.0) == 2  # never rejected: a key problem, not a bad event
+        times = [r.at for r in fake_backend.event_requests()]
+        assert times == [1000.0 + 10.0 * n for n in range(7)]  # fixed 10 s, no backoff
+        assert sender.unauthorized and sender.unauthorized_count == 7
+        assert (sender.rejected_count, sender.rejected_422_count, sender.sent_count) == (0, 0, 0)
+        assert sender.retry_count == 7
+        assert not rejected_dir.exists() or not list(rejected_dir.iterdir())
+        item = spool.get_item(1)
+        assert item is not None and item.status == "pending"
+        assert (item.attempts, item.client_errors) == (7, 0)  # the 4xx budget is untouched
+        assert item.last_error is not None
+        assert item.last_error.startswith(f"HTTP {status} (unauthorized)")
+        fake_backend.failing_cameras.clear()  # the operator fixed SAFETY_AI_API_KEY
+        assert sender.flush(15.0) == 0
+    assert not sender.unauthorized and sender.sent_count == 2
+    assert fake_backend.sequence()[-2:] == [
+        ("POST", payload.external_id),
+        ("PATCH", payload.external_id),
+    ]
+    prefix = (
+        f"backend rejected the API key (HTTP {status}) for POST /api/v1/ingest/events — check "
+        "SAFETY_AI_API_KEY / the website's AI key; 2 requests kept in the spool and retried "
+        "every 10 s"
+    )
+    assert _auth_errors(caplog) == [
+        f"{prefix} (POST {payload.external_id}, attempt 1)",
+        f"{prefix} (POST {payload.external_id}, attempt 7) (5 similar refusals since the last "
+        "report)",
+    ]
+    assert not any(r.levelno == logging.WARNING for r in caplog.records)
+    assert "s3cr3t" not in caplog.text  # the key itself is never logged
+    assert "after 70.0 s of failures" in caplog.text
+
+
+def test_one_refused_key_line_per_minute_for_all_cameras(
+    spool: EventSpool,
+    make_sender: Callable[..., SpoolSender],
+    fake_backend: Any,
+    make_payload: Callable[..., EventPayload],
+    jpeg: bytes,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    for camera_id in ("cam-1", "cam-2", "cam-3"):
+        spool.enqueue_post(make_payload(camera_id=camera_id), jpeg)
+        fake_backend.fail_camera(camera_id, 401)
+    sender = make_sender()
+    with caplog.at_level(logging.ERROR, logger="safety_ai.backend.spool"):
+        assert sender.flush(55.0) == 3
+    assert len(fake_backend.event_requests()) == 18  # 3 lanes x 6 attempts (0, 10 ... 50 s)
+    assert len(_auth_errors(caplog)) == 1
+    assert sender.unauthorized_count == 18
+
+
+def test_a_refused_patch_names_the_patch_endpoint(
+    spool: EventSpool,
+    make_sender: Callable[..., SpoolSender],
+    fake_backend: Any,
+    make_payload: Callable[..., EventPayload],
+    jpeg: bytes,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    payload = make_payload()
+    spool.enqueue_post(payload, jpeg)
+    sender = make_sender()
+    assert sender.flush(10.0) == 0
+    spool.enqueue_patch("cam-1", payload.external_id, ENDED)
+    fake_backend.fail_next(httpx.Response(403))
+    with caplog.at_level(logging.ERROR, logger="safety_ai.backend.spool"):
+        assert sender.flush(30.0) == 0
+    (error,) = _auth_errors(caplog)
+    assert "(HTTP 403) for PATCH /api/v1/ingest/events/{external_id} — check" in error
+    first, second = (r.at for r in fake_backend.event_requests()[1:])
+    assert second - first == pytest.approx(10.0)
+
+
+def test_a_refused_repost_after_patch_404_is_retried_as_a_post(
+    spool: EventSpool,
+    make_sender: Callable[..., SpoolSender],
+    fake_backend: Any,
+    make_payload: Callable[..., EventPayload],
+    jpeg: bytes,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    payload = make_payload()
+    spool.enqueue_post(payload, jpeg)
+    sender = make_sender()
+    assert sender.flush(10.0) == 0
+    fake_backend.forget_events()
+    spool.enqueue_patch("cam-1", payload.external_id, ENDED)
+    refused: list[int] = []
+
+    def refuse_first_repost(received: Any) -> httpx.Response | None:
+        if received.method == "POST" and not refused:
+            refused.append(1)
+            return httpx.Response(401)
+        return None
+
+    fake_backend.hooks.append(refuse_first_repost)
+    with caplog.at_level(logging.ERROR, logger="safety_ai.backend.spool"):
+        assert sender.flush(30.0) == 0
+    assert [m for m, _ in fake_backend.sequence()] == ["POST", "PATCH", "POST", "POST"]
+    (error,) = _auth_errors(caplog)
+    assert "for POST /api/v1/ingest/events — check" in error
+    assert sender.rejected_count == 0 and sender.sent_count == 2
+
+
+def test_the_refused_key_line_survives_a_busy_database(
+    spool: EventSpool,
+    make_sender: Callable[..., SpoolSender],
+    fake_backend: Any,
+    make_payload: Callable[..., EventPayload],
+    jpeg: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    spool.enqueue_post(make_payload(), jpeg)
+    fake_backend.fail_next(httpx.Response(401))
+    real_count = spool.pending_count
+    calls: list[int] = []
+
+    def busy_once(camera_id: str | None = None) -> int:
+        calls.append(1)
+        if len(calls) == 1:  # the count for the log line meets a locked database
+            raise sqlite3.OperationalError("database is locked")
+        return real_count(camera_id)
+
+    monkeypatch.setattr(spool, "pending_count", busy_once)
+    with caplog.at_level(logging.ERROR, logger="safety_ai.backend.spool"):
+        assert make_sender().flush(30.0) == 0
+    (error,) = _auth_errors(caplog)
+    assert "; the requests kept in the spool and retried every 10 s" in error
+
+
+def test_the_thread_waits_for_the_key_and_then_delivers(
+    spool: EventSpool,
+    live_sender: Callable[..., SpoolSender],
+    fake_backend: Any,
+    make_payload: Callable[..., EventPayload],
+    jpeg: bytes,
+    wait_until: Callable[..., bool],
+) -> None:
+    fake_backend.fail_camera("cam-1", 401)
+    spool.enqueue_post(make_payload(), jpeg)
+    sender = live_sender(auth_retry_s=0.05)
+    sender.start()
+    assert wait_until(lambda: sender.unauthorized_count >= 3)
+    assert sender.unauthorized and spool.pending_count() == 1
+    fake_backend.failing_cameras.clear()
+    assert wait_until(lambda: spool.pending_count() == 0)
+    assert not sender.unauthorized and sender.rejected_count == 0
 
 
 # ---------------------------------------------------------------------------- PATCH 404
@@ -676,6 +857,8 @@ def test_flush_with_zero_timeout_sends_nothing(
         {"poll_s": 0.0},
         {"backoff_initial": 0.0},
         {"backoff_initial": 5.0, "backoff_max": 1.0},
+        {"auth_retry_s": 0.0},
+        {"auth_log_interval_s": -1.0},
     ],
 )
 def test_invalid_settings_are_rejected(

@@ -5,10 +5,10 @@ The mock validates every message the AI module sends with its own strict models
 DECISIONS.md D-024), answers with the contract's status codes, records every contract violation
 and exposes debug endpoints for tests, ``safety-ai selftest`` and the run verifier.
 
-Run it::
+Run it (default port 8010, so it never collides with the website backend on 8000)::
 
-    python -m tools.mock_backend --port 8000 --config tools/mock_config.yaml
-    safety-ai mock-backend --port 8000 --config tools/mock_config.yaml   # CLI wrapper of serve()
+    python -m tools.mock_backend --port 8010 --config tools/mock_config.yaml
+    safety-ai mock-backend --port 8010 --config tools/mock_config.yaml   # CLI wrapper of serve()
 
 Embed it (tests, selftest)::
 
@@ -16,20 +16,28 @@ Embed it (tests, selftest)::
         ...  # point the client at mock.base_url / mock.ws_url with API key "test-key"
         assert mock.state.summary()["violations"]["total"] == 0
 
-Contract endpoints (``X-API-Key`` required when a key is configured, else 401 + violation):
+Contract endpoints (``X-API-Key`` required when a key is configured, else 401 + violation; the
+behaviour follows the integration contract, DECISIONS.md D-036).
+Every error response has the contract body ``{"error": {"code", "message", "details"}}`` (codes
+``unauthorized`` 401, ``not_found`` 404, ``conflict`` 409, ``payload_too_large`` 413,
+``unsupported_media_type`` 415, ``validation_error`` 422 with the field errors in
+``details.fields`` as ``[{"location": [...], "message": ...}]``):
 
 * ``POST /api/v1/ingest/events`` - multipart (form field ``payload`` = JSON string, file
   ``snapshot`` = JPEG) or ``application/json`` with ``snapshot_base64``. 201
   ``{"id", "status": "new", "severity", "deduplicated": false}`` for a new event, 200 with the
   same body for a repeated ``external_id``, 202 ``{"deduplicated": true, "id": <existing>}`` when an
   accepted event of the same (camera, zone, type, track) started less than 60 s earlier (event
-  time, D-024), 422 ``{"detail", "errors": [...]}`` for any contract violation. Severity: the
-  zone's ``severity_override``, else the payload's, else critical (fall_detected,
-  person_immobile), high (zone_intrusion, vehicle_proximity), medium (ppe_violation,
-  overcrowding), low (custom).
+  time, D-024), 422 for any contract violation, 413 for a snapshot over 5 MB, 415 for another
+  ``Content-Type``. Severity (contract 4.1, as the website resolves it): the payload's, else the
+  zone's ``severity_override``, else critical (fall_detected, person_immobile), high
+  (zone_intrusion, vehicle_proximity), medium (ppe_violation; high when the helmet is missing in
+  a danger zone, custom), low (overcrowding).
 * ``PATCH /api/v1/ingest/events/{external_id}`` - body exactly ``{"ended_at"}``; 404 for an
   unknown external_id, 200 ``{"id", "status": "closed"}``, 422 for a violation.
 * ``POST /api/v1/ingest/heartbeat``, ``POST /api/v1/ingest/stats`` - 200 ``{"status": "ok"}``.
+  The heartbeat ``extra`` is free-form (at most 16 KB of JSON); ``extra.supported_ppe``, when
+  present, must be a list of distinct PPE codes.
 * ``GET /api/v1/ingest/config/{camera_id}`` (404 when unknown), ``GET /api/v1/ingest/config``
   (JSON array of every camera config, D-012).
 * ``WS /ws/ingest?api_key=...`` - ``detections`` (at most 15 per 1 s of ``ts`` per camera),
@@ -90,6 +98,7 @@ from typing import Annotated, Any, Final, Literal
 import httpx
 import uvicorn
 from fastapi import FastAPI, Query, Request, WebSocket
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -100,6 +109,7 @@ from typing_extensions import Self
 
 from tools.mock_models import (
     ContractError,
+    check_snapshot_size,
     decode_base64,
     excerpt_of,
     format_validation_errors,
@@ -130,12 +140,15 @@ from tools.mock_state import (
     MockState,
     SystemMockClock,
     WsConnection,
+    error_body,
+    field_errors,
 )
 
 __all__ = [
     "DEFAULT_API_KEY",
     "DEFAULT_CONFIG_PATH",
     "DEFAULT_DATA_DIR",
+    "DEFAULT_PORT",
     "ApiKeyPolicy",
     "EventSubmission",
     "MockBackendServer",
@@ -152,6 +165,9 @@ _log = logging.getLogger(__name__)
 DEFAULT_CONFIG_PATH: Final[Path] = Path(__file__).resolve().parent / "mock_config.yaml"
 DEFAULT_DATA_DIR: Final[Path] = Path("mock_data")
 DEFAULT_API_KEY: Final[str] = "test-key"
+DEFAULT_PORT: Final[int] = 8010
+"""Port of ``serve()`` and ``python -m tools.mock_backend`` (the website backend uses 8000)."""
+_EVENT_MEDIA_TYPES: Final[str] = "multipart/form-data or application/json"
 _FORM_FIELDS: Final[frozenset[str]] = frozenset({"payload", "snapshot"})
 _INGEST_PREFIX: Final[str] = "/api/v1/ingest/"
 _STARTUP_POLL_S: Final[float] = 0.02
@@ -210,6 +226,12 @@ class _EventReader:
         media_type = media_type_of(content_type)
         if media_type == "multipart/form-data":
             return await self._read_multipart()
+        if media_type != "application/json":
+            raise ContractError(
+                f"Content-Type must be {_EVENT_MEDIA_TYPES}",
+                [f"Content-Type: {content_type or '<missing>'}, expected {_EVENT_MEDIA_TYPES}"],
+                status=415,
+            )
         body = await self._request.body()
         self.excerpt = _body_excerpt(body)
         data = parse_json_object(content_type, body, what="event body")
@@ -271,7 +293,9 @@ class _EventReader:
         if declared and declared != "image/jpeg":
             problems.append(f"snapshot: part Content-Type is {declared!r}, expected image/jpeg")
             return None
-        return await value.read()
+        data = await value.read()
+        check_snapshot_size(data)
+        return data
 
     @staticmethod
     def _from_json(data: dict[str, Any]) -> EventSubmission:
@@ -285,6 +309,7 @@ class _EventReader:
         if not isinstance(encoded, str):
             raise ContractError("invalid event body", ["snapshot_base64: must be a string"])
         snapshot = decode_base64(encoded, what="snapshot_base64")
+        check_snapshot_size(snapshot, what="snapshot_base64")
         return EventSubmission(payload=payload, snapshot=snapshot, transport="json")
 
 
@@ -294,10 +319,16 @@ def _respond(outcome: HttpOutcome) -> JSONResponse:
 
 def _fault_response(hit: FaultHit) -> JSONResponse:
     return JSONResponse(
-        {"detail": "injected fault", "status": hit.status},
+        error_body(hit.status, "injected fault", {"injected": True}),
         status_code=hit.status,
         headers=hit.headers(),
     )
+
+
+def _error(status: int, message: str, problems: Sequence[str] = ()) -> JSONResponse:
+    """A debug-endpoint error in the contract's body (``problems`` as ``details.fields``)."""
+    details = {"fields": field_errors(problems)} if problems else None
+    return JSONResponse(error_body(status, message, details), status_code=status)
 
 
 def _raw_string(data: Mapping[str, Any], key: str) -> str:
@@ -324,8 +355,8 @@ class _Guard:
         problem = self._policy.problem(request.headers.get("x-api-key"), source="X-API-Key")
         if problem is None:
             return None
-        error = ContractError("unauthorized", [problem])
-        return _respond(self._state.reject(endpoint, error, "", status=401))
+        error = ContractError("unauthorized", [problem], status=401)
+        return _respond(self._state.reject(endpoint, error, ""))
 
 
 def _add_event_routes(app: FastAPI, state: MockState, guard: _Guard) -> None:
@@ -560,13 +591,9 @@ def _add_debug_control_routes(app: FastAPI, state: MockState) -> None:
         try:
             reloaded = await run_in_threadpool(state.reload_config, camera_id)
         except ConfigFileError as exc:
-            return JSONResponse(
-                {"detail": "invalid mock config", "errors": list(exc.messages)}, status_code=422
-            )
+            return _error(422, "invalid mock config", exc.messages)
         except KeyError:
-            return JSONResponse(
-                {"detail": f"camera {camera_id!r} is not in {state.config.path}"}, status_code=404
-            )
+            return _error(404, f"camera {camera_id!r} is not in {state.config.path}")
         return JSONResponse({"reloaded": reloaded})
 
     @app.post("/debug/set-config/{camera_id}")
@@ -577,9 +604,9 @@ def _add_debug_control_routes(app: FastAPI, state: MockState) -> None:
             data = parse_json_object(request.headers.get("content-type"), body, what="config")
             result = state.set_config(camera_id, validate_camera_config(data))
         except ContractError as exc:
-            return JSONResponse({"detail": exc.reason, "errors": list(exc.errors)}, status_code=422)
+            return _error(exc.status, exc.reason, exc.errors)
         except ValueError as exc:
-            return JSONResponse({"detail": str(exc), "errors": [str(exc)]}, status_code=422)
+            return _error(422, str(exc), [f"camera.id: {exc}"])
         return JSONResponse(result)
 
     @app.post("/debug/fail-next")
@@ -593,7 +620,7 @@ def _add_debug_control_routes(app: FastAPI, state: MockState) -> None:
         try:
             rule = state.faults.add(status, count, path, retry_after)
         except ValueError as exc:
-            return JSONResponse({"detail": str(exc)}, status_code=409)
+            return _error(409, str(exc))
         return JSONResponse({"rule": rule.to_json(), "pending": state.faults.pending()})
 
     @app.post("/debug/ws-error")
@@ -608,10 +635,9 @@ def _add_debug_control_routes(app: FastAPI, state: MockState) -> None:
             )
             spec = _WsErrorRequest.model_validate(data)
         except ContractError as exc:
-            return JSONResponse({"detail": exc.reason, "errors": list(exc.errors)}, status_code=422)
+            return _error(exc.status, exc.reason, exc.errors)
         except ValidationError as exc:
-            errors = format_validation_errors(exc)
-            return JSONResponse({"detail": "invalid ws-error body", "errors": errors}, 422)
+            return _error(422, "invalid ws-error body", format_validation_errors(exc))
         reached = state.broadcast_error(spec.message, spec.id)
         sent = {"type": "error", "message": spec.message, "id": spec.id}
         return JSONResponse({"sent_to": reached, "message": sent})
@@ -638,7 +664,19 @@ def _add_error_handlers(app: FastAPI, state: MockState) -> None:
                 excerpt="",
             )
         return JSONResponse(
-            {"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers
+            error_body(exc.status_code, str(exc.detail)),
+            status_code=exc.status_code,
+            headers=exc.headers,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_error(request: Request, exc: RequestValidationError) -> Response:
+        """Invalid query parameters of the debug endpoints: 422 with the field errors."""
+        fields = [
+            {"location": list(error["loc"]), "message": error["msg"]} for error in exc.errors()
+        ]
+        return JSONResponse(
+            error_body(422, "invalid request parameters", {"fields": fields}), status_code=422
         )
 
 
@@ -887,7 +925,7 @@ class MockBackendServer:
 
 def serve(
     host: str = "127.0.0.1",
-    port: int = 8000,
+    port: int = DEFAULT_PORT,
     config_path: Path = DEFAULT_CONFIG_PATH,
     data_dir: Path = DEFAULT_DATA_DIR,
     api_key: str | None = DEFAULT_API_KEY,
@@ -923,7 +961,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Strict mock of the safety-ai website backend (integration contract 4).",
     )
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8000, help="port (default 8000)")
+    parser.add_argument(
+        "--port", type=int, default=DEFAULT_PORT, help=f"port (default {DEFAULT_PORT})"
+    )
     parser.add_argument(
         "--config",
         type=Path,

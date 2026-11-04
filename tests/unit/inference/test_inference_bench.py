@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -136,6 +137,7 @@ def run(
             "cpu",
             registry,
             images if images is not None else [np.zeros((48, 64, 3), dtype=np.uint8)],
+            isolate=False,
             loader=loader,
             timer=timer,
             rss_mb=rss or (lambda: 100.0),
@@ -283,6 +285,241 @@ def test_bench_merges_with_existing_results(
     assert [(r.device, r.fps) for r in merged.results] == [("cpu", 32.0), ("cuda:0", 50.0)]
 
 
+def test_bench_drops_stored_results_of_unregistered_models(
+    run: Callable[..., Any], registry: ModelRegistry, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="safety_ai.inference.bench")
+    path = registry.path.with_name("bench.json")
+    old = BenchReport(
+        created_at=T0,
+        host=HOST,
+        results=[_result("ppe_n_retired", "pt", "cpu", 9.0), _result("pose_n", "pt", "cpu", 7.0)],
+    )
+    write_bench(path, old)
+    run(["vehicle_n"], ["pt"])
+    merged = load_bench(path)
+    assert merged is not None
+    assert [(r.model, r.fps) for r in merged.results] == [("pose_n", 7.0), ("vehicle_n", 32.0)]
+    assert "ppe_n_retired" in caplog.text
+
+
+def test_write_bench_keeps_everything_without_a_model_filter(tmp_path: Path) -> None:
+    path = tmp_path / "bench.json"
+    write_bench(path, BenchReport(created_at=T0, host=HOST, results=[_result("a", "pt", "cpu", 1)]))
+    merged = write_bench(
+        path, BenchReport(created_at=T0, host=HOST, results=[_result("b", "pt", "cpu", 2)])
+    )
+    assert [r.model for r in merged.results] == ["a", "b"]
+
+
+def test_bench_restores_torch_threads_changed_by_a_backend(
+    registry: ModelRegistry, fake_result: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeTorch:
+        def __init__(self) -> None:
+            self.threads = 6
+            self.calls: list[int] = []
+
+        def get_num_threads(self) -> int:
+            return self.threads
+
+        def set_num_threads(self, count: int) -> None:
+            self.calls.append(count)
+            self.threads = count
+
+    torch = FakeTorch()
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    timer = FakeTimer(0.05)
+
+    class ThrottlingModel(TimedModel):
+        def predict(self, source: Any, **kwargs: Any) -> list[Any]:
+            torch.set_num_threads(2)  # what Ultralytics does after an ONNX/OpenVINO CPU setup
+            return super().predict(source, **kwargs)
+
+    bench.bench(
+        ["vehicle_n"],
+        ["pt", "onnx"],
+        0.1,
+        320,
+        "cpu",
+        registry,
+        [np.zeros((8, 8, 3), dtype=np.uint8)],
+        warmup=0,
+        isolate=False,
+        loader=lambda p, t: ThrottlingModel(timer, {0: "person"}, fake_result),
+        timer=timer,
+        rss_mb=lambda: 1.0,
+        host=HOST,
+        clock=FakeClock(T0),
+    )
+    assert torch.threads == 6
+    assert torch.calls.count(6) == 2  # restored after each of the two combinations
+
+
+@pytest.mark.parametrize("hook", ["loader", "timer", "rss_mb"])
+def test_test_hooks_require_in_process_mode(registry: ModelRegistry, hook: str) -> None:
+    hooks: dict[str, Any] = {"loader": lambda p, t: None, "timer": lambda: 0.0}
+    hooks["rss_mb"] = lambda: 1.0
+    with pytest.raises(ValueError, match="isolate=False"):
+        bench.bench(
+            ["vehicle_n"],
+            ["pt"],
+            1.0,
+            320,
+            "cpu",
+            registry,
+            [np.zeros((8, 8, 3), dtype=np.uint8)],
+            **{hook: hooks[hook]},
+        )
+
+
+# --------------------------------------------------------------------------------------------
+# isolation (one spawned process per combination)
+# --------------------------------------------------------------------------------------------
+
+
+def _job(registry: ModelRegistry, model: str = "vehicle_n") -> Any:
+    return bench._Job(
+        registry_path=registry.path,
+        model=model,
+        backend="pt",
+        device="cpu",
+        task="detect",
+        imgsz=320,
+        seconds=0.1,
+        warmup=0,
+        half=False,
+        frames=(np.zeros((8, 8, 3), dtype=np.uint8),),
+    )
+
+
+def test_a_failing_isolated_combination_raises_its_error_in_the_parent(
+    registry: ModelRegistry,
+) -> None:
+    with pytest.raises(RuntimeError, match=r"RegistryError: model 'ghost_n' is not in"):
+        bench._run_isolated(_job(registry, "ghost_n"), timeout_s=120.0)
+
+
+class FakeProcess:
+    """Stands in for a spawned process; records how it was stopped."""
+
+    def __init__(self, *, alive_after_join: bool) -> None:
+        self.alive = True
+        self.alive_after_join = alive_after_join
+        self.exitcode: int | None = None
+        self.events: list[str] = []
+
+    def start(self) -> None:
+        self.events.append("start")
+
+    def join(self, timeout: float | None = None) -> None:
+        self.events.append("join")
+        if not self.alive_after_join:
+            self.alive, self.exitcode = False, 0
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+    def terminate(self) -> None:
+        self.events.append("terminate")
+        self.alive, self.exitcode = False, -15
+
+
+class FakeConnection:
+    def __init__(self, *, ready: bool, message: Any = None) -> None:
+        self.ready = ready
+        self.message = message
+        self.closed = False
+
+    def poll(self, timeout: float) -> bool:
+        return self.ready
+
+    def recv(self) -> Any:
+        if self.message is None:
+            raise EOFError
+        return self.message
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeContext:
+    def __init__(self, receiver: FakeConnection, process: FakeProcess) -> None:
+        self.receiver = receiver
+        self.process = process
+        self.sender = FakeConnection(ready=False)
+
+    def Pipe(self, duplex: bool = True) -> tuple[FakeConnection, FakeConnection]:
+        assert duplex is False
+        return self.receiver, self.sender
+
+    def Process(self, **kwargs: Any) -> FakeProcess:
+        assert kwargs["daemon"] is True
+        assert kwargs["target"] is bench._child_main
+        return self.process
+
+
+@pytest.fixture
+def fake_spawn(monkeypatch: pytest.MonkeyPatch) -> Callable[..., FakeContext]:
+    def install(receiver: FakeConnection, process: FakeProcess) -> FakeContext:
+        context = FakeContext(receiver, process)
+        monkeypatch.setattr(bench.multiprocessing, "get_context", lambda method: context)
+        return context
+
+    return install
+
+
+def test_isolated_result_is_parsed(
+    registry: ModelRegistry, fake_spawn: Callable[..., FakeContext]
+) -> None:
+    payload = _result("vehicle_n", "pt", "cpu", 12.5).model_dump(mode="json")
+    context = fake_spawn(
+        FakeConnection(ready=True, message=("ok", payload)), FakeProcess(alive_after_join=False)
+    )
+    result = bench._run_isolated(_job(registry), timeout_s=5.0)
+    assert result == _result("vehicle_n", "pt", "cpu", 12.5)
+    assert context.sender.closed and context.receiver.closed
+    assert context.process.events == ["start", "join"]
+
+
+def test_a_hanging_isolated_combination_times_out_and_is_terminated(
+    registry: ModelRegistry, fake_spawn: Callable[..., FakeContext]
+) -> None:
+    context = fake_spawn(FakeConnection(ready=False), FakeProcess(alive_after_join=True))
+    with pytest.raises(TimeoutError, match="no result within 5 s"):
+        bench._run_isolated(_job(registry), timeout_s=5.0)
+    assert context.process.events == ["start", "join", "terminate", "join"]
+    assert context.receiver.closed
+
+
+def test_an_isolated_process_dying_without_a_result_is_reported(
+    registry: ModelRegistry, fake_spawn: Callable[..., FakeContext]
+) -> None:
+    fake_spawn(FakeConnection(ready=True), FakeProcess(alive_after_join=False))
+    with pytest.raises(RuntimeError, match=r"exit code 0\): the benchmark process exited"):
+        bench._run_isolated(_job(registry), timeout_s=5.0)
+
+
+def test_child_main_reports_errors_and_survives_a_closed_parent(registry: ModelRegistry) -> None:
+    class ClosedPipe:
+        def __init__(self) -> None:
+            self.sent: list[Any] = []
+            self.closed = False
+
+        def send(self, message: Any) -> None:
+            self.sent.append(message)
+            raise BrokenPipeError("the parent closed its end")
+
+        def close(self) -> None:
+            self.closed = True
+
+    pipe = ClosedPipe()
+    bench._child_main(pipe, _job(registry, "ghost_n"))  # type: ignore[arg-type]
+    [(status, message)] = pipe.sent
+    assert status == "error" and "ghost_n" in message
+    assert pipe.closed
+
+
 def test_bench_reads_image_paths(run: Callable[..., Any], tmp_path: Path) -> None:
     image = tmp_path / "sample.png"
     assert cv2.imwrite(str(image), np.full((40, 60, 3), 127, dtype=np.uint8))
@@ -331,6 +568,7 @@ def test_bench_with_an_explicit_output_path(
         [np.zeros((8, 8, 3), dtype=np.uint8)],
         bench_path=out,
         warmup=0,
+        isolate=False,
         loader=lambda p, t: TimedModel(timer, {0: "person"}, fake_result),
         timer=timer,
         rss_mb=lambda: 1.0,

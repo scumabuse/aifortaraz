@@ -19,12 +19,19 @@ Rules enforced on AI -> site messages:
   carries at least one ``person`` box, ``vehicle_proximity`` also a vehicle box and its
   ``track_id`` equals ``details.person_track_id``; boxes are ``[x, y, w, h]`` normalized to the
   original frame (each value 0..1, ``x + w`` and ``y + h`` at most ``1 + 1e-3``);
-* snapshots: JPEG (magic bytes ``FF D8 FF``, decodable), longest side <= 1280 px, the full raw
-  frame (aspect ratio of ``details.frame_size``, never larger than it);
-* heartbeat (4.2), stats (4.3, with the 5.11 consistency rules: minute-aligned windows,
-  ``persons_compliant <= persons_total``, ``compliant <= checked <= persons_total``) and the
-  WebSocket messages of 4.5 (``detections``, ``frame`` with a JPEG of longest side <= 960 px,
-  ``heartbeat``).
+* snapshots: JPEG (magic bytes ``FF D8 FF``, decodable), at most 5 MB (else HTTP 413), longest
+  side <= 1280 px, the full raw frame (aspect ratio of ``details.frame_size``, never larger than
+  it);
+* heartbeat (4.2: ``extra`` is a free-form JSON object of at most 16 KB, as on the website; when
+  ``extra.supported_ppe`` is present it must be a list of distinct PPE codes), stats (4.3, with
+  the 5.11 consistency rules: minute-aligned windows, ``persons_compliant <= persons_total``,
+  ``compliant <= checked <= persons_total``) and the WebSocket messages of 4.5 (``detections``,
+  ``frame`` with a JPEG of longest side <= 960 px, ``heartbeat``);
+* a JSON body sent with another ``Content-Type`` is refused with HTTP 415.
+
+Severity of an accepted event follows contract 4.1 as the website implements it
+(:func:`resolve_severity`): the payload's value, else the zone's ``severity_override``, else the
+type default (ppe_violation ``high`` when the helmet is missing in a ``danger`` zone).
 
 The camera configuration models (4.4) validate the mock's own YAML file and the bodies of
 ``POST /debug/set-config/{camera_id}`` with the same strictness.
@@ -40,6 +47,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Annotated, Any, Final, Literal, TypeVar
 
 from PIL import Image
@@ -59,7 +67,9 @@ __all__ = [
     "BOX_LABELS",
     "DEFAULT_SEVERITY",
     "EVENT_TYPES",
+    "MAX_EXTRA_CHARS",
     "MAX_FRAME_SIDE",
+    "MAX_SNAPSHOT_BYTES",
     "MAX_SNAPSHOT_SIDE",
     "PPE_CODES",
     "VEHICLE_LABELS",
@@ -103,6 +113,7 @@ __all__ = [
     "ZoneRulesModel",
     "analyse_ws_message",
     "camera_config_to_contract",
+    "check_snapshot_size",
     "decode_base64",
     "excerpt_of",
     "external_id_matches",
@@ -111,6 +122,7 @@ __all__ = [
     "media_type_of",
     "parse_json_object",
     "parse_z_timestamp",
+    "resolve_severity",
     "snapshot_geometry_problems",
     "validate_camera_config",
     "validate_event_payload",
@@ -185,18 +197,25 @@ EVENT_TYPES: Final[tuple[str, ...]] = (
 )
 WS_MESSAGE_TYPES: Final[tuple[str, ...]] = ("detections", "frame", "heartbeat")
 
-DEFAULT_SEVERITY: Final[Mapping[str, str]] = {
-    "fall_detected": "critical",
-    "person_immobile": "critical",
-    "zone_intrusion": "high",
-    "vehicle_proximity": "high",
-    "ppe_violation": "medium",
-    "overcrowding": "medium",
-    "custom": "low",
-}
-"""Severity the backend assigns when the payload sends ``null`` and the zone has no override."""
+DEFAULT_SEVERITY: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "fall_detected": "critical",
+        "person_immobile": "critical",
+        "zone_intrusion": "high",
+        "vehicle_proximity": "high",
+        "ppe_violation": "medium",
+        "overcrowding": "low",
+        "custom": "medium",
+    }
+)
+"""Type defaults of contract 4.1 (used when the payload sends ``null`` and the zone has no
+override); ppe_violation is ``high`` instead when the helmet is missing in a danger zone."""
 
 MAX_SNAPSHOT_SIDE: Final[int] = 1280
+MAX_SNAPSHOT_BYTES: Final[int] = 5 * 1024 * 1024
+"""Largest snapshot the website stores (contract 4.1: <= 5 MB); larger ones get HTTP 413."""
+MAX_EXTRA_CHARS: Final[int] = 16 * 1024
+"""Largest ``heartbeat.extra`` the website accepts (``len(json.dumps(extra))``, 16 KB)."""
 MAX_FRAME_SIDE: Final[int] = 960
 BBOX_TOLERANCE: Final[float] = 1e-3
 ASPECT_TOLERANCE: Final[float] = 0.02
@@ -215,12 +234,17 @@ _T = TypeVar("_T")
 
 
 class ContractError(Exception):
-    """A message broke the integration contract; ``errors`` lists every problem found."""
+    """A message broke the integration contract; ``errors`` lists every problem found.
 
-    def __init__(self, reason: str, errors: Sequence[str] = ()) -> None:
+    ``status`` is the HTTP status the mock answers with: 422 for invalid content (the default),
+    413 for an oversized snapshot, 415 for a wrong ``Content-Type``, 401 for a refused key.
+    """
+
+    def __init__(self, reason: str, errors: Sequence[str] = (), *, status: int = 422) -> None:
         """Create the error from a short ``reason`` and the detailed ``errors`` lines."""
         self.reason = reason
         self.errors: tuple[str, ...] = tuple(errors) if errors else (reason,)
+        self.status = status
         super().__init__(f"{reason}: {'; '.join(self.errors)}")
 
 
@@ -552,23 +576,45 @@ class ValidatedEvent:
 # --------------------------------------------------------------------------------------------
 
 
-class HeartbeatExtraModel(StrictModel):
-    """``extra`` of a heartbeat: the contract's five keys plus the optional ``model_family``."""
+class HeartbeatExtraModel(BaseModel):
+    """``extra`` of a heartbeat: free-form (contract 4.2), any keys and JSON values.
 
-    device: NonEmptyStr
-    backend: NonEmptyStr
-    queue_depth: NonNegInt
-    frames_dropped: NonNegInt
-    stream: NonEmptyStr
-    model_family: NonEmptyStr | None = None
-    """Optional detector family (DECISIONS.md D-020); when present it must be a string."""
+    The one rule is the contract's additive extension: ``supported_ppe``, when present, is a list
+    of distinct PPE codes (omitted, never ``null``, when the AI does not know them).
+    """
+
+    model_config = ConfigDict(extra="allow", strict=True, frozen=True)
+
+    supported_ppe: list[PpeCode] | None = None
 
     @model_validator(mode="after")
-    def _model_family_not_null(self) -> Self:
-        """``model_family`` may be omitted but not sent as null."""
-        if "model_family" in self.model_fields_set and self.model_family is None:
-            raise ValueError("extra.model_family must be a non-empty string when present")
+    def _supported_ppe_when_present(self) -> Self:
+        """``supported_ppe`` may be omitted, but when sent it is a list of distinct codes."""
+        if "supported_ppe" not in self.model_fields_set:
+            return self
+        if self.supported_ppe is None:
+            raise ValueError(
+                "extra.supported_ppe must be a list of PPE codes when present (leave the key out "
+                "when the model's PPE classes are unknown)"
+            )
+        duplicates = sorted({c for c in self.supported_ppe if self.supported_ppe.count(c) > 1})
+        if duplicates:
+            raise ValueError(f"extra.supported_ppe lists {duplicates} more than once")
         return self
+
+
+def _bounded_extra(value: object) -> object:
+    """``extra`` must be plain JSON of at most 16 KB (the website's own limit)."""
+    if isinstance(value, dict):
+        try:
+            size = len(json.dumps(value, allow_nan=False))
+        except ValueError as exc:
+            raise ValueError("extra must be plain JSON (no NaN or Infinity)") from exc
+        if size > MAX_EXTRA_CHARS:
+            raise ValueError(
+                f"extra is {size} characters of JSON; the website accepts at most {MAX_EXTRA_CHARS}"
+            )
+    return value
 
 
 class HeartbeatModel(StrictModel):
@@ -579,7 +625,7 @@ class HeartbeatModel(StrictModel):
     model_name: NonEmptyStr
     model_version: NonEmptyStr
     status: Literal["ok", "degraded"]
-    extra: HeartbeatExtraModel
+    extra: Annotated[HeartbeatExtraModel, BeforeValidator(_bounded_extra)]
 
 
 class PpeStatModel(StrictModel):
@@ -847,12 +893,14 @@ def parse_json_object(content_type: str | None, body: bytes, *, what: str) -> di
     """Decode a JSON request body that must be an object sent as ``application/json``.
 
     Raises:
-        ContractError: Wrong ``Content-Type``, invalid JSON or not a JSON object.
+        ContractError: Wrong ``Content-Type`` (status 415), invalid JSON or not a JSON object
+            (status 422).
     """
     if not _is_json_media_type(media_type_of(content_type)):
         raise ContractError(
             "Content-Type must be application/json",
             [f"Content-Type: {content_type or '<missing>'}, expected application/json"],
+            status=415,
         )
     try:
         data = json.loads(body)
@@ -899,6 +947,37 @@ def validate_camera_config(data: object) -> CameraConfigModel:
     """Validate a camera configuration object (contract 4.4 structure)."""
     _require_object(data, "camera config")
     return _validate(CameraConfigModel.model_validate, data, "invalid camera config")
+
+
+def check_snapshot_size(data: bytes, *, what: str = "snapshot") -> None:
+    """Refuse a snapshot larger than 5 MB (contract 4.1): :class:`ContractError` status 413."""
+    if len(data) > MAX_SNAPSHOT_BYTES:
+        raise ContractError(
+            f"{what} is larger than 5 MB",
+            [f"{what}: {len(data)} bytes, at most {MAX_SNAPSHOT_BYTES} bytes (5 MB)"],
+            status=413,
+        )
+
+
+def resolve_severity(event: AnyEvent, zone: ZoneModel | None) -> str:
+    """The severity the website stores for ``event`` (contract 4.1).
+
+    The payload's severity when it is not null; else the zone's ``severity_override``; else the
+    type default of :data:`DEFAULT_SEVERITY`, except ``high`` for a ppe_violation whose
+    ``missing_ppe`` contains the helmet in a zone of type ``danger``.
+    """
+    if event.severity is not None:
+        return event.severity
+    if zone is not None and zone.rules.severity_override is not None:
+        return zone.rules.severity_override
+    if (
+        isinstance(event, PpeViolationEvent)
+        and zone is not None
+        and zone.type == "danger"
+        and "helmet" in event.details.missing_ppe
+    ):
+        return "high"
+    return DEFAULT_SEVERITY[event.type]
 
 
 def decode_base64(text: str, *, what: str) -> bytes:

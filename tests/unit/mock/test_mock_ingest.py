@@ -45,30 +45,70 @@ def test_heartbeat_is_accepted_and_recorded_with_arrival_times(
     assert summary["http"]["POST /api/v1/ingest/heartbeat"] == {"200": 2}
 
 
-def test_heartbeat_filters(client: Any, payloads: Any) -> None:
+def test_heartbeat_filters(client: Any, payloads: Any, error_of: Any) -> None:
     client.post("/api/v1/ingest/heartbeat", json=payloads.heartbeat())
     client.post("/api/v1/ingest/heartbeat", json=payloads.heartbeat(camera_id="cam-2"))
     assert len(client.get("/debug/heartbeats", params={"camera_id": "cam-2"}).json()) == 1
     assert client.get("/debug/heartbeats", params={"channel": "ws"}).json() == []
-    assert client.get("/debug/heartbeats", params={"channel": "udp"}).status_code == 422
+    invalid = client.get("/debug/heartbeats", params={"channel": "udp"})
+    assert invalid.status_code == 422
+    error = error_of(invalid)
+    assert (error["code"], error["message"]) == ("validation_error", "invalid request parameters")
+    assert error["details"]["fields"][0]["location"] == ["query", "channel"]
 
 
-def test_invalid_heartbeat_is_rejected_and_not_recorded(client: Any, payloads: Any) -> None:
+def test_heartbeat_extra_is_free_form(client: Any, payloads: Any) -> None:
+    # Contract 4.2: any keys and values; only supported_ppe has a rule when it is present.
     payload = payloads.heartbeat()
-    payload["extra"]["temperature"] = 70
+    payload["extra"] = {
+        "temperature": 70,
+        "gpu": {"name": "GTX 1660 SUPER", "util": [0.4, None]},
+        "supported_ppe": ["helmet", "vest", "glasses", "gloves", "mask", "boots", "earmuffs"],
+    }
+    assert client.post("/api/v1/ingest/heartbeat", json=payload).status_code == 200
+    minimal = payloads.heartbeat(extra={})
+    assert client.post("/api/v1/ingest/heartbeat", json=minimal).status_code == 200
+    records = client.get("/debug/heartbeats").json()
+    assert [record["payload"] for record in records] == [payload, minimal]
+    assert client.get("/debug/violations").json() == []
+
+
+@pytest.mark.parametrize(
+    ("extra", "fragment"),
+    [
+        ({"supported_ppe": ["helmet", "jetpack"]}, "extra.supported_ppe.1"),
+        ({"supported_ppe": None}, "must be a list of PPE codes when present"),
+        ({"supported_ppe": "helmet"}, "extra.supported_ppe"),
+        ({"supported_ppe": ["vest", "vest"]}, "more than once"),
+        ({"blob": "x" * 20_000}, "at most 16384"),
+    ],
+)
+def test_invalid_heartbeat_is_rejected_and_not_recorded(
+    client: Any, payloads: Any, error_lines: Any, extra: dict[str, Any], fragment: str
+) -> None:
+    payload = payloads.heartbeat()
+    payload["extra"].update(extra)
     response = client.post("/api/v1/ingest/heartbeat", json=payload)
     assert response.status_code == 422
-    assert any("temperature: Extra inputs" in e for e in response.json()["errors"])
+    assert any(fragment in e for e in error_lines(response)), error_lines(response)
     assert client.get("/debug/heartbeats").json() == []
     violation = client.get("/debug/violations").json()[0]
     assert violation["endpoint"] == "POST /api/v1/ingest/heartbeat"
-    assert '"temperature":70' in violation["excerpt"]
+    assert '"supported_ppe"' in violation["excerpt"] or '"blob"' in violation["excerpt"]
 
 
-def test_heartbeat_needs_json(client: Any) -> None:
+def test_heartbeat_needs_json(client: Any, error_of: Any) -> None:
     response = client.post("/api/v1/ingest/heartbeat", content=b"{}")
-    assert response.status_code == 422
-    assert response.json()["errors"] == ["Content-Type: <missing>, expected application/json"]
+    assert response.status_code == 415
+    assert error_of(response) == {
+        "code": "unsupported_media_type",
+        "message": "Content-Type must be application/json",
+        "details": {
+            "fields": [
+                {"location": ["Content-Type"], "message": "<missing>, expected application/json"}
+            ]
+        },
+    }
 
 
 def test_stats_are_accepted_and_recorded(client: Any, payloads: Any, clock: Any) -> None:
@@ -100,10 +140,15 @@ def test_invalid_stats_are_rejected(client: Any, payloads: Any) -> None:
     ],
 )
 def test_telemetry_requires_the_api_key(
-    anon_client: Any, payloads: Any, path: str, body: str
+    anon_client: Any, payloads: Any, error_of: Any, path: str, body: str
 ) -> None:
     response = anon_client.post(path, json=getattr(payloads, body)())
     assert response.status_code == 401
+    assert error_of(response) == {
+        "code": "unauthorized",
+        "message": "X-API-Key is missing",
+        "details": {},
+    }
     assert anon_client.get("/debug/summary").json()["http"][f"POST {path}"] == {"401": 1}
 
 
@@ -122,9 +167,14 @@ def test_get_config_of_one_camera(client: Any, clock: Any) -> None:
     assert [zone["id"] for zone in config["zones"]] == ["cam1-shop-floor", "cam1-press-danger"]
 
 
-def test_get_config_of_an_unknown_camera_is_404(client: Any) -> None:
+def test_get_config_of_an_unknown_camera_is_404(client: Any, error_of: Any) -> None:
     response = client.get("/api/v1/ingest/config/cam-9")
     assert response.status_code == 404
+    assert error_of(response) == {
+        "code": "not_found",
+        "message": "unknown camera 'cam-9'",
+        "details": {},
+    }
     assert client.get("/debug/violations").json() == []
 
 
@@ -137,9 +187,11 @@ def test_list_config_is_a_json_array_of_every_camera(client: Any) -> None:
     assert configs[0] == client.get("/api/v1/ingest/config/cam-1").json()
 
 
-def test_config_requires_the_api_key(anon_client: Any) -> None:
-    assert anon_client.get("/api/v1/ingest/config").status_code == 401
-    assert anon_client.get("/api/v1/ingest/config/cam-1").status_code == 401
+def test_config_requires_the_api_key(anon_client: Any, error_of: Any) -> None:
+    for url in ("/api/v1/ingest/config", "/api/v1/ingest/config/cam-1"):
+        response = anon_client.get(url, headers={"X-API-Key": "revoked"})
+        assert response.status_code == 401
+        assert error_of(response)["message"] == "X-API-Key does not match the configured API key"
     assert len(anon_client.get("/debug/violations").json()) == 2
 
 
@@ -191,19 +243,23 @@ def test_reload_config_bumps_every_camera(
 
 def test_reload_config_of_one_camera(editable_client: Any) -> None:
     response = editable_client.post("/debug/reload-config", params={"camera_id": "cam-3"})
-    assert response.json() == {"reloaded": [{"camera_id": "cam-3", "version": 2, "broadcast_to": 0}]}
+    assert response.json() == {
+        "reloaded": [{"camera_id": "cam-3", "version": 2, "broadcast_to": 0}]
+    }
     versions = editable_client.get("/debug/summary").json()["config_versions"]
     assert versions == {"cam-1": 1, "cam-2": 1, "cam-3": 2, "cam-4": 1}
 
 
-def test_reload_config_of_an_unknown_camera_is_404(editable_client: Any) -> None:
+def test_reload_config_of_an_unknown_camera_is_404(editable_client: Any, error_of: Any) -> None:
     response = editable_client.post("/debug/reload-config", params={"camera_id": "cam-9"})
     assert response.status_code == 404
+    assert error_of(response)["code"] == "not_found"
+    assert "'cam-9' is not in" in error_of(response)["message"]
     assert editable_client.get("/debug/summary").json()["config_versions"]["cam-1"] == 1
 
 
 def test_reload_config_with_an_invalid_file_changes_nothing(
-    editable_client: Any, editable_config: Path
+    editable_client: Any, editable_config: Path, error_of: Any, error_lines: Any
 ) -> None:
     def break_it(data: dict[str, Any]) -> None:
         data["cameras"][0]["zones"][0]["type"] = "parking"
@@ -211,7 +267,8 @@ def test_reload_config_with_an_invalid_file_changes_nothing(
     _rewrite(editable_config, break_it)
     response = editable_client.post("/debug/reload-config")
     assert response.status_code == 422
-    assert any("type" in error for error in response.json()["errors"])
+    assert error_of(response)["message"] == "invalid mock config"
+    assert any(error.startswith("cameras.0.zones.0.type: ") for error in error_lines(response))
     config = editable_client.get("/api/v1/ingest/config/cam-1").json()
     assert config["version"] == 1
     assert config["zones"][0]["type"] == "ppe"
@@ -269,20 +326,26 @@ def test_set_config_can_create_a_camera(client: Any, payloads: Any) -> None:
     ],
 )
 def test_set_config_rejects_invalid_bodies(
-    client: Any, payloads: Any, camera_id: str, mutate: Any, fragment: str
+    client: Any, payloads: Any, error_lines: Any, camera_id: str, mutate: Any, fragment: str
 ) -> None:
     config = payloads.config()
     mutate(config)
     response = client.post(f"/debug/set-config/{camera_id}", json=config)
     assert response.status_code == 422
-    assert any(fragment in error for error in response.json()["errors"]), response.json()
+    assert any(fragment in error for error in error_lines(response)), response.json()
     assert client.get("/debug/summary").json()["config_versions"]["cam-1"] == 1
     assert client.get("/debug/violations").json() == []
 
 
-def test_set_config_needs_json(client: Any) -> None:
+def test_set_config_needs_json(client: Any, error_of: Any) -> None:
     response = client.post("/debug/set-config/cam-1", content=b"x")
-    assert response.status_code == 422
+    assert response.status_code == 415
+    assert error_of(response)["code"] == "unsupported_media_type"
+    broken = client.post(
+        "/debug/set-config/cam-1", content=b"{", headers={"Content-Type": "application/json"}
+    )
+    assert broken.status_code == 422
+    assert error_of(broken)["message"] == "config is not valid JSON"
 
 
 # --------------------------------------------------------------------------------------------
@@ -293,7 +356,12 @@ def test_set_config_needs_json(client: Any) -> None:
 def test_fail_next_then_recovery(client: Any, post_event: Any, payloads: Any) -> None:
     armed = client.post("/debug/fail-next", params={"status": 503, "count": 3})
     assert armed.status_code == 200
-    assert armed.json()["rule"] == {"status": 503, "remaining": 3, "path": "any", "retry_after": None}
+    assert armed.json()["rule"] == {
+        "status": 503,
+        "remaining": 3,
+        "path": "any",
+        "retry_after": None,
+    }
     statuses = [post_event(payloads.event()).status_code for _ in range(3)]
     assert statuses == [503, 503, 503]
     recovered = post_event(payloads.event())
@@ -326,13 +394,35 @@ def test_fail_next_path_filter(client: Any, post_event: Any, payloads: Any) -> N
     ],
 )
 def test_fail_next_matches_each_path_kind(
-    client: Any, path: str, request_args: tuple[str, str]
+    client: Any, error_of: Any, path: str, request_args: tuple[str, str]
 ) -> None:
     client.post("/debug/fail-next", params={"status": 502, "path": path})
     method, url = request_args
     response = client.request(method, url, json={})
     assert response.status_code == 502
-    assert response.json() == {"detail": "injected fault", "status": 502}
+    assert error_of(response) == {
+        "code": "bad_gateway",
+        "message": "injected fault",
+        "details": {"injected": True},
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [
+        (401, "unauthorized"),
+        (413, "payload_too_large"),
+        (500, "internal_error"),
+        (507, "http_error"),
+    ],
+)
+def test_injected_faults_use_the_contract_error_body(
+    client: Any, payloads: Any, error_of: Any, status: int, code: str
+) -> None:
+    client.post("/debug/fail-next", params={"status": status, "path": "stats"})
+    response = client.post("/api/v1/ingest/stats", json=payloads.stats())
+    assert response.status_code == status
+    assert error_of(response)["code"] == code
 
 
 def test_fail_next_with_retry_after(client: Any, payloads: Any) -> None:
@@ -361,17 +451,24 @@ def test_fault_comes_before_authentication(anon_client: Any) -> None:
     "params",
     [{"status": 200}, {"status": 600}, {"count": 0}, {"path": "ws"}, {"retry_after": -1}],
 )
-def test_fail_next_parameter_validation(client: Any, params: dict[str, Any]) -> None:
-    assert client.post("/debug/fail-next", params=params).status_code == 422
+def test_fail_next_parameter_validation(client: Any, error_of: Any, params: dict[str, Any]) -> None:
+    response = client.post("/debug/fail-next", params=params)
+    assert response.status_code == 422
+    fields = error_of(response)["details"]["fields"]
+    assert [field["location"] for field in fields] == [["query", next(iter(params))]]
     assert client.get("/debug/summary").json()["faults_pending"] == []
 
 
-def test_fail_next_limits_pending_rules(client: Any) -> None:
+def test_fail_next_limits_pending_rules(client: Any, error_of: Any) -> None:
     for _ in range(64):
         assert client.post("/debug/fail-next", params={"count": 1}).status_code == 200
     response = client.post("/debug/fail-next", params={"count": 1})
     assert response.status_code == 409
-    assert "at most 64" in response.json()["detail"]
+    assert error_of(response) == {
+        "code": "conflict",
+        "message": "at most 64 fault rules may be pending",
+        "details": {},
+    }
 
 
 def test_reset_clears_faults(client: Any, payloads: Any) -> None:

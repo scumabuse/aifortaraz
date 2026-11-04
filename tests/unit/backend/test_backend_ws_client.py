@@ -11,7 +11,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable, Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -316,7 +316,7 @@ def test_rejected_handshakes_are_retried_with_backoff(
     wait_until: Callable[..., bool],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    ws_server.reject_status = 403
+    ws_server.reject_status = 503
     client = make_ws_client(ws_server.url)
     with caplog.at_level(logging.INFO, logger="safety_ai.backend.ws_client"):
         client.start()
@@ -327,9 +327,66 @@ def test_rejected_handshakes_are_retried_with_backoff(
     failures = [r for r in caplog.records if "failed: InvalidStatus" in r.getMessage()]
     assert failures[0].levelno == logging.WARNING  # the first failure of an outage
     assert all(r.levelno == logging.INFO for r in failures[1:])
-    assert "HTTP 403" in failures[0].getMessage()
-    assert f"api_key=****" in failures[0].getMessage()
+    assert "HTTP 503" in failures[0].getMessage()
+    assert "api_key=****" in failures[0].getMessage()
     assert client.reconnects >= 2
+    assert not client.unauthorized and client.auth_error_count == 0
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refused_key_is_reported_once_and_retried_at_a_fixed_pace(
+    ws_server: Any,
+    make_ws_client: Callable[..., WsClient],
+    wait_until: Callable[..., bool],
+    caplog: pytest.LogCaptureFixture,
+    status: int,
+) -> None:
+    ws_server.reject_status = status  # the website answers a wrong ?api_key= with 403
+    client = make_ws_client(ws_server.url, auth_retry_s=0.05, backoff_initial=5.0, backoff_max=5.0)
+    assert not client.unauthorized and client.last_auth_error_at is None
+    with caplog.at_level(logging.DEBUG, logger="safety_ai.backend.ws_client"):
+        client.start()
+        # 5 s backoff would allow one attempt; the fixed 0.05 s refused-key pace allows many.
+        assert wait_until(lambda: len(ws_server.handshakes) >= 4)
+        assert client.unauthorized and not client.connected
+        assert client.auth_error_count >= 3 and client.last_auth_error_at is not None
+        ws_server.reject_status = None
+        assert client.wait_connected(5)
+    assert not client.unauthorized
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors == [
+        f"backend rejected the API key (HTTP {status}) for WS /ws/ingest — check "
+        "SAFETY_AI_API_KEY / the website's AI key; detections, frames and heartbeat copies "
+        "are dropped and the connection is retried every 0.05 s"
+    ]
+    assert not any("failed: InvalidStatus" in r.getMessage() for r in caplog.records)
+    assert "backend accepts the API key again (websocket connected)" in caplog.text
+    assert API_KEY not in caplog.text and QUOTED_KEY not in caplog.text
+
+
+def test_refused_key_lines_are_rate_limited_on_the_clock(
+    ws_server: Any,
+    make_ws_client: Callable[..., WsClient],
+    wait_until: Callable[..., bool],
+    caplog: pytest.LogCaptureFixture,
+    fake_clock: FakeClock,
+) -> None:
+    ws_server.reject_status = 403
+    client = make_ws_client(ws_server.url, clock=fake_clock, auth_retry_s=0.02)
+
+    def lines() -> list[str]:
+        return [r.getMessage() for r in caplog.records if "rejected the API key" in r.getMessage()]
+
+    with caplog.at_level(logging.ERROR, logger="safety_ai.backend.ws_client"):
+        client.start()
+        assert wait_until(lambda: len(ws_server.handshakes) >= 3)
+        assert len(lines()) == 1  # the clock did not move: one line per minute
+        fake_clock.advance(61.0)
+        assert wait_until(lambda: len(lines()) == 2)
+        client.stop()
+    assert "similar refusals since the last report)" in lines()[1]
+    assert client.last_auth_error_at is not None
+    assert client.last_auth_error_at >= fake_clock.now_utc() - timedelta(seconds=1)
 
 
 def test_stop_is_quick_when_connected_backing_off_or_connecting(
@@ -501,6 +558,12 @@ def test_invalid_arguments_are_rejected() -> None:
         WsClient("ws://b/ws", None, on_server_message=print, clock=SystemClock(), max_queue=0)
     with pytest.raises(ValueError, match="backoff"):
         WsClient("ws://b/ws", None, on_server_message=print, clock=SystemClock(), backoff_initial=0)
+    with pytest.raises(ValueError, match="auth_retry_s"):
+        WsClient("ws://b/ws", None, on_server_message=print, clock=SystemClock(), auth_retry_s=0)
+    with pytest.raises(ValueError, match="auth_log_interval_s"):
+        WsClient(
+            "ws://b/ws", None, on_server_message=print, clock=SystemClock(), auth_log_interval_s=-1
+        )
 
 
 def test_url_and_masking_helpers() -> None:

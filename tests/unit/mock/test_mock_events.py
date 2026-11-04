@@ -44,16 +44,27 @@ def test_contract_example_event_is_created(client: Any, post_event: Any, payload
         ("zone_intrusion", "cam1-press-danger", "high"),
         ("vehicle_proximity", "cam1-shop-floor", "high"),
         ("ppe_violation", "cam1-shop-floor", "medium"),
-        ("overcrowding", "cam1-press-danger", "medium"),
-        ("custom", "cam1-shop-floor", "low"),
+        ("ppe_violation", "cam1-press-danger", "high"),  # helmet missing in a danger zone
+        ("overcrowding", "cam1-press-danger", "low"),
+        ("custom", "cam1-shop-floor", "medium"),
     ],
 )
 def test_default_severity_by_type(
     post_event: Any, payloads: Any, event_type: str, zone_id: str | None, severity: str
 ) -> None:
+    # Contract 4.1: the AI sends null and the website resolves the type default.
     response = post_event(payloads.event(event_type, zone_id=zone_id))
     assert response.status_code == 201, response.json()
     assert response.json()["severity"] == severity
+
+
+def test_ppe_violation_in_a_danger_zone_without_the_helmet_missing_is_medium(
+    post_event: Any, payloads: Any
+) -> None:
+    payload = payloads.event("ppe_violation", zone_id="cam1-press-danger")
+    payload["details"]["missing_ppe"] = ["vest"]
+    payload["details"]["present_ppe"] = ["helmet"]
+    assert post_event(payload).json()["severity"] == "medium"
 
 
 def test_payload_severity_is_kept(post_event: Any, payloads: Any) -> None:
@@ -65,13 +76,23 @@ def test_payload_severity_is_kept(post_event: Any, payloads: Any) -> None:
     ("camera_id", "zone_id", "severity"),
     [("cam-2", "cam2-forklift-aisle", "critical"), ("cam-4", "cam4-hydraulic-lift", "high")],
 )
-def test_zone_severity_override_wins(
+def test_zone_severity_override_resolves_a_null_severity(
     post_event: Any, payloads: Any, camera_id: str, zone_id: str, severity: str
 ) -> None:
-    payload = payloads.event("ppe_violation", camera_id=camera_id, zone_id=zone_id, severity="low")
+    payload = payloads.event("ppe_violation", camera_id=camera_id, zone_id=zone_id)
     response = post_event(payload)
     assert response.status_code == 201
     assert response.json()["severity"] == severity
+
+
+def test_an_explicit_payload_severity_wins_over_the_zone_override(
+    post_event: Any, payloads: Any
+) -> None:
+    # The website keeps a non-null severity as sent, which is why the AI always sends null.
+    payload = payloads.event(
+        "ppe_violation", camera_id="cam-2", zone_id="cam2-forklift-aisle", severity="low"
+    )
+    assert post_event(payload).json()["severity"] == "low"
 
 
 def test_json_alternative_is_accepted(client: Any, post_event: Any, payloads: Any) -> None:
@@ -174,14 +195,15 @@ def test_cooldown_compares_with_the_latest_accepted_event(post_event: Any, paylo
 
 
 def test_external_id_reused_for_a_different_event_is_a_violation(
-    client: Any, post_event: Any, payloads: Any
+    client: Any, post_event: Any, payloads: Any, error_of: Any, error_lines: Any
 ) -> None:
     assert post_event(payloads.event()).status_code == 201
     other = payloads.event(zone_id="cam1-press-danger")
     response = post_event(other)
     assert response.status_code == 422
-    assert response.json()["detail"] == "external_id reused for a different event"
-    assert any("zone_id" in error for error in response.json()["errors"])
+    assert error_of(response)["code"] == "validation_error"
+    assert error_of(response)["message"] == "external_id reused for a different event"
+    assert any("zone_id" in error for error in error_lines(response))
     violations = _violations(client)
     assert violations[0]["reason"] == "external_id reused for a different event"
 
@@ -237,12 +259,17 @@ def test_patch_closes_a_known_event(
     assert summary["events"] == {"stored": 1, "open": 0, "closed": 1, "deduplicated": 0}
 
 
-def test_patch_of_an_unknown_event_is_404_not_a_violation(client: Any) -> None:
+def test_patch_of_an_unknown_event_is_404_not_a_violation(client: Any, error_of: Any) -> None:
     response = client.patch(
         "/api/v1/ingest/events/cam-1-1762179667-99-ppe_violation",
         json={"ended_at": "2026-11-03T14:21:19Z"},
     )
     assert response.status_code == 404
+    assert error_of(response) == {
+        "code": "not_found",
+        "message": "unknown external_id 'cam-1-1762179667-99-ppe_violation'",
+        "details": {},
+    }
     assert _violations(client) == []
     assert client.get("/debug/summary").json()["http"] == {
         "PATCH /api/v1/ingest/events/{external_id}": {"404": 1}
@@ -259,12 +286,17 @@ def test_patch_of_an_unknown_event_is_404_not_a_violation(client: Any) -> None:
     ],
 )
 def test_invalid_patch_is_rejected(
-    client: Any, post_event: Any, payloads: Any, body: dict[str, Any], fragment: str
+    client: Any,
+    post_event: Any,
+    payloads: Any,
+    error_lines: Any,
+    body: dict[str, Any],
+    fragment: str,
 ) -> None:
     post_event(payloads.event())
     response = client.patch("/api/v1/ingest/events/cam-1-1762179667-17-ppe_violation", json=body)
     assert response.status_code == 422
-    assert any(fragment in error for error in response.json()["errors"]), response.json()
+    assert any(fragment in error for error in error_lines(response)), response.json()
     violation = _violations(client)[0]
     assert violation["endpoint"] == "PATCH /api/v1/ingest/events/{external_id}"
     assert violation["channel"] == "http"
@@ -272,15 +304,25 @@ def test_invalid_patch_is_rejected(
     assert event["ended_at"] is None
 
 
-def test_patch_requires_a_json_content_type(client: Any, post_event: Any, payloads: Any) -> None:
+def test_patch_requires_a_json_content_type(
+    client: Any, post_event: Any, payloads: Any, error_of: Any
+) -> None:
     post_event(payloads.event())
     response = client.patch(
         "/api/v1/ingest/events/cam-1-1762179667-17-ppe_violation",
         content=b'{"ended_at": "2026-11-03T14:21:19Z"}',
         headers={"Content-Type": "text/plain"},
     )
-    assert response.status_code == 422
-    assert response.json()["detail"] == "Content-Type must be application/json"
+    assert response.status_code == 415
+    error = error_of(response)
+    assert (error["code"], error["message"]) == (
+        "unsupported_media_type",
+        "Content-Type must be application/json",
+    )
+    assert error["details"]["fields"] == [
+        {"location": ["Content-Type"], "message": "text/plain, expected application/json"}
+    ]
+    assert _violations(client)[0]["endpoint"] == "PATCH /api/v1/ingest/events/{external_id}"
 
 
 # --------------------------------------------------------------------------------------------
@@ -289,21 +331,25 @@ def test_patch_requires_a_json_content_type(client: Any, post_event: Any, payloa
 
 
 def test_invalid_payload_gets_422_listing_errors_and_is_recorded(
-    client: Any, post_event: Any, payloads: Any
+    client: Any, post_event: Any, payloads: Any, error_of: Any, error_lines: Any
 ) -> None:
     payload = payloads.event(severity="urgent", confidence=3)
     response = post_event(payload)
     assert response.status_code == 422
-    body = response.json()
-    assert body["detail"] == "invalid event"
-    assert len(body["errors"]) == 2
+    error = error_of(response)
+    assert (error["code"], error["message"]) == ("validation_error", "invalid event")
+    fields = error["details"]["fields"]
+    assert [field["location"] for field in fields] == [
+        ["ppe_violation", "severity"],
+        ["ppe_violation", "confidence"],
+    ]
     violations = _violations(client)
     assert len(violations) == 1
     violation = violations[0]
     assert violation["endpoint"] == "POST /api/v1/ingest/events"
     assert violation["channel"] == "http"
     assert violation["reason"] == "invalid event"
-    assert violation["errors"] == body["errors"]
+    assert violation["errors"] == error_lines(response)
     assert violation["excerpt"] == json.dumps(payload)
     assert violation["time"] == "2026-11-03T14:00:00.000Z"
     assert client.get("/debug/events").json() == []
@@ -321,36 +367,38 @@ def _multipart(client: Any, data: dict[str, Any], files: dict[str, Any] | None) 
     return client.post("/api/v1/ingest/events", data=data, files=files)
 
 
-def test_missing_snapshot_file(client: Any, payloads: Any) -> None:
+def test_missing_snapshot_file(client: Any, payloads: Any, error_lines: Any) -> None:
     response = client.post(
         "/api/v1/ingest/events",
         data={"payload": json.dumps(payloads.event())},
         files={"other": ("x.txt", b"x", "text/plain")},
     )
     assert response.status_code == 422
-    errors = response.json()["errors"]
+    errors = error_lines(response)
     assert any("snapshot: exactly one file part required, got 0" in e for e in errors)
     assert any("unexpected field(s) ['other']" in e for e in errors)
 
 
-def test_snapshot_sent_as_text_field(client: Any, payloads: Any) -> None:
+def test_snapshot_sent_as_text_field(client: Any, payloads: Any, error_lines: Any) -> None:
     response = client.post(
         "/api/v1/ingest/events",
         data={"payload": json.dumps(payloads.event()), "snapshot": "not a file"},
         files={"unused": ("u.jpg", b"\xff\xd8\xff", "image/jpeg")},
     )
     assert response.status_code == 422
-    assert any("must be a file part" in e for e in response.json()["errors"])
+    assert any("must be a file part" in e for e in error_lines(response))
 
 
-def test_snapshot_part_with_wrong_content_type(client: Any, payloads: Any, jpeg: Any) -> None:
+def test_snapshot_part_with_wrong_content_type(
+    client: Any, payloads: Any, jpeg: Any, error_lines: Any
+) -> None:
     response = client.post(
         "/api/v1/ingest/events",
         data={"payload": json.dumps(payloads.event())},
         files={"snapshot": ("snapshot.bin", jpeg(1280, 720), "application/octet-stream")},
     )
     assert response.status_code == 422
-    assert any("expected image/jpeg" in e for e in response.json()["errors"])
+    assert any("expected image/jpeg" in e for e in error_lines(response))
 
 
 @pytest.mark.parametrize(
@@ -358,7 +406,7 @@ def test_snapshot_part_with_wrong_content_type(client: Any, payloads: Any, jpeg:
     [("{not json", "payload: not valid JSON"), ("[1, 2]", "payload: must be a JSON object")],
 )
 def test_payload_field_must_be_a_json_object(
-    client: Any, jpeg: Any, payload_text: str, fragment: str
+    client: Any, jpeg: Any, error_lines: Any, payload_text: str, fragment: str
 ) -> None:
     response = client.post(
         "/api/v1/ingest/events",
@@ -366,11 +414,11 @@ def test_payload_field_must_be_a_json_object(
         files={"snapshot": ("snapshot.jpg", jpeg(1280, 720), "image/jpeg")},
     )
     assert response.status_code == 422
-    assert any(fragment in e for e in response.json()["errors"])
+    assert any(fragment in e for e in error_lines(response))
     assert _violations(client)[0]["excerpt"] == payload_text
 
 
-def test_payload_sent_as_file_part(client: Any, payloads: Any, jpeg: Any) -> None:
+def test_payload_sent_as_file_part(client: Any, payloads: Any, jpeg: Any, error_lines: Any) -> None:
     response = client.post(
         "/api/v1/ingest/events",
         files={
@@ -379,27 +427,27 @@ def test_payload_sent_as_file_part(client: Any, payloads: Any, jpeg: Any) -> Non
         },
     )
     assert response.status_code == 422
-    assert any("payload: must be a form field" in e for e in response.json()["errors"])
+    assert any("payload: must be a form field" in e for e in error_lines(response))
 
 
-def test_multipart_payload_missing(client: Any, jpeg: Any) -> None:
+def test_multipart_payload_missing(client: Any, jpeg: Any, error_lines: Any) -> None:
     response = client.post(
         "/api/v1/ingest/events",
         files={"snapshot": ("snapshot.jpg", jpeg(1280, 720), "image/jpeg")},
     )
     assert response.status_code == 422
-    errors = response.json()["errors"]
+    errors = error_lines(response)
     assert any("payload: exactly one form field required, got 0" in e for e in errors)
 
 
-def test_broken_multipart_body(client: Any) -> None:
+def test_broken_multipart_body(client: Any, error_of: Any) -> None:
     response = client.post(
         "/api/v1/ingest/events",
         content=b"--abc\r\nno headers at all",
         headers={"Content-Type": "multipart/form-data"},
     )
     assert response.status_code == 422
-    assert response.json()["detail"] == "invalid multipart body"
+    assert error_of(response)["message"] == "invalid multipart body"
 
 
 @pytest.mark.parametrize(
@@ -410,33 +458,63 @@ def test_broken_multipart_body(client: Any) -> None:
         ({"snapshot_base64": "@@@"}, "snapshot_base64:"),
     ],
 )
-def test_json_alternative_snapshot_rules(client: Any, body: dict[str, Any], fragment: str) -> None:
+def test_json_alternative_snapshot_rules(
+    client: Any, error_lines: Any, body: dict[str, Any], fragment: str
+) -> None:
     response = client.post("/api/v1/ingest/events", json=body)
     assert response.status_code == 422
-    assert any(fragment in e for e in response.json()["errors"]), response.json()
+    assert any(fragment in e for e in error_lines(response)), response.json()
 
 
-def test_json_alternative_with_a_non_jpeg_snapshot(client: Any, payloads: Any) -> None:
+def test_json_alternative_with_a_non_jpeg_snapshot(
+    client: Any, payloads: Any, error_lines: Any
+) -> None:
     body = dict(payloads.event(), snapshot_base64=base64.b64encode(b"GIF89a....").decode())
     response = client.post("/api/v1/ingest/events", json=body)
     assert response.status_code == 422
-    assert any("magic bytes" in e for e in response.json()["errors"])
+    assert any("magic bytes" in e for e in error_lines(response))
 
 
-def test_unsupported_content_type(client: Any) -> None:
-    response = client.post(
-        "/api/v1/ingest/events", content=b"payload=1", headers={"Content-Type": "text/plain"}
-    )
-    assert response.status_code == 422
-    assert response.json()["detail"] == "Content-Type must be application/json"
+@pytest.mark.parametrize("content_type", ["text/plain", "application/xml", None])
+def test_unsupported_content_type_is_415(
+    client: Any, error_of: Any, content_type: str | None
+) -> None:
+    headers = {"Content-Type": content_type} if content_type is not None else {}
+    response = client.post("/api/v1/ingest/events", content=b"payload=1", headers=headers)
+    assert response.status_code == 415
+    error = error_of(response)
+    assert error["code"] == "unsupported_media_type"
+    assert error["message"] == "Content-Type must be multipart/form-data or application/json"
+    violation = _violations(client)[0]
+    assert violation["reason"] == error["message"]
+    summary = client.get("/debug/summary").json()
+    assert summary["http"]["POST /api/v1/ingest/events"] == {"415": 1}
 
 
-def test_oversized_snapshot_over_http(post_event: Any, payloads: Any, jpeg: Any) -> None:
+def test_oversized_snapshot_over_http(
+    post_event: Any, payloads: Any, jpeg: Any, error_lines: Any
+) -> None:
     payload = payloads.event()
     payload["details"]["frame_size"] = [1600, 900]
     response = post_event(payload, jpeg(1600, 900))
     assert response.status_code == 422
-    assert any("longest side must be <= 1280 px" in e for e in response.json()["errors"])
+    assert any("longest side must be <= 1280 px" in e for e in error_lines(response))
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_a_snapshot_over_5_mb_is_413(
+    client: Any, post_event: Any, payloads: Any, jpeg: Any, error_of: Any, as_json: bool
+) -> None:
+    huge = jpeg(1280, 720) + bytes(5 * 1024 * 1024)  # a valid JPEG followed by padding
+    response = post_event(payloads.event(), huge, as_json=as_json)
+    assert response.status_code == 413
+    error = error_of(response)
+    assert (error["code"], error["message"]) == (
+        "payload_too_large",
+        f"{'snapshot_base64' if as_json else 'snapshot'} is larger than 5 MB",
+    )
+    assert _violations(client)[0]["endpoint"] == "POST /api/v1/ingest/events"
+    assert client.get("/debug/events").json() == []
 
 
 # --------------------------------------------------------------------------------------------
@@ -446,13 +524,15 @@ def test_oversized_snapshot_over_http(post_event: Any, payloads: Any, jpeg: Any)
 
 @pytest.mark.parametrize("key", [None, "wrong-key"])
 def test_api_key_is_required(
-    anon_client: Any, post_event: Any, payloads: Any, key: str | None
+    anon_client: Any, post_event: Any, payloads: Any, error_of: Any, key: str | None
 ) -> None:
     headers = {"X-API-Key": key} if key is not None else None
     response = post_event(payloads.event(), test_client=anon_client, headers=headers)
     assert response.status_code == 401
-    expected = "X-API-Key is missing" if key is None else "does not match the configured API key"
-    assert expected in response.json()["errors"][0]
+    expected = (
+        "X-API-Key is missing" if key is None else "X-API-Key does not match the configured API key"
+    )
+    assert error_of(response) == {"code": "unauthorized", "message": expected, "details": {}}
     violation = _violations(anon_client)[0]
     assert violation["reason"] == "unauthorized"
     assert "wrong-key" not in json.dumps(violation)
@@ -574,15 +654,19 @@ def test_data_dir_is_emptied_when_the_app_is_created(
     ],
 )
 def test_unknown_ingest_endpoints_are_violations(
-    client: Any, method: str, path: str, status: int, reason: str
+    client: Any, error_of: Any, method: str, path: str, status: int, reason: str
 ) -> None:
     response = client.request(method, path, json={})
     assert response.status_code == status
+    expected_code = "not_found" if status == 404 else "method_not_allowed"
+    assert error_of(response)["code"] == expected_code
     violation = _violations(client)[0]
     assert violation["reason"] == reason
     assert violation["endpoint"] == f"{method} {path}"
 
 
-def test_unknown_non_ingest_paths_are_plain_404(client: Any) -> None:
-    assert client.get("/nothing-here").status_code == 404
+def test_unknown_non_ingest_paths_are_plain_404(client: Any, error_of: Any) -> None:
+    response = client.get("/nothing-here")
+    assert response.status_code == 404
+    assert error_of(response) == {"code": "not_found", "message": "Not Found", "details": {}}
     assert _violations(client) == []

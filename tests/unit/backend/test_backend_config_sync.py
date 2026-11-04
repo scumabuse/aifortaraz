@@ -20,6 +20,13 @@ from safety_ai.clock import FakeClock
 
 UNREACHABLE = BackendError("connection refused", endpoint="config_all", reason="connection")
 NOT_FOUND = BackendError("HTTP 404", endpoint="config_all", reason="status", status_code=404)
+REFUSED = BackendError("HTTP 401", endpoint="config_all", reason="status", status_code=401)
+REFUSED_ONE = BackendError("HTTP 403", endpoint="config", reason="status", status_code=403)
+REFUSED_LINE = (
+    "backend rejected the API key (HTTP 401) for GET /api/v1/ingest/config — check "
+    "SAFETY_AI_API_KEY / the website's AI key; the cameras keep their current or cached "
+    "configuration and the request is retried every 10 s"
+)
 
 
 def config(camera_id: str, version: int = 1, max_persons: int = 2) -> dict[str, Any]:
@@ -511,7 +518,148 @@ def test_stop_gives_up_on_a_busy_thread(
     assert wait_until(lambda: not any(t.name == "config-sync" for t in threading.enumerate()))
 
 
-@pytest.mark.parametrize("kwargs", [{"refresh_s": 0.0}, {"poll_s": 0.0}, {"refresh_s": -1.0}])
+# ---------------------------------------------------------------------------- refused API key
+
+
+def _refused_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "backend rejected the API key" in r.getMessage()
+    ]
+
+
+def test_a_refused_key_falls_back_to_the_cache(
+    make_sync: Callable[..., ConfigSync],
+    source: FakeSource,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    write_cache(tmp_path / "cache", "cam-1", config("cam-1", version=41))
+    source.error = REFUSED
+    sync = make_sync()
+    assert not sync.unauthorized
+    with caplog.at_level(logging.INFO, logger="safety_ai.backend.config_sync"):
+        loaded = sync.load_initial()
+    assert list(loaded) == ["cam-1"] and loaded["cam-1"].version == 41
+    assert sync.origin("cam-1") == "cache"
+    assert source.call_list() == ["all"]  # the key is refused for every camera alike
+    assert sync.unauthorized
+    assert _refused_lines(caplog) == [REFUSED_LINE]
+    assert "camera cam-1: configuration version 41 loaded from cache" in caplog.text
+    assert "camera cam-2: no configuration (backend rejected the API key" in caplog.text
+    assert not any(
+        r.levelno == logging.WARNING and "unavailable" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_a_refused_key_on_the_camera_endpoint_stops_the_fetch(
+    make_sync: Callable[..., ConfigSync],
+    source: FakeSource,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    source.list_error = NOT_FOUND
+    source.one_errors["cam-1"] = REFUSED_ONE
+    write_cache(tmp_path / "cache", "cam-2", config("cam-2", version=7))
+    with caplog.at_level(logging.ERROR, logger="safety_ai.backend.config_sync"):
+        loaded = make_sync().load_initial()
+    assert source.call_list() == ["all", "one:cam-1"]
+    assert list(loaded) == ["cam-2"] and loaded["cam-2"].version == 7
+    (line,) = _refused_lines(caplog)
+    assert line.startswith(
+        "backend rejected the API key (HTTP 403) for GET /api/v1/ingest/config/{camera_id} — "
+    )
+
+
+def test_refused_key_lines_are_rate_limited_and_the_state_recovers(
+    make_sync: Callable[..., ConfigSync],
+    source: FakeSource,
+    fake_clock: FakeClock,
+    notified: list[CameraConfig],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sync = make_sync()
+    loaded = sync.load_initial()
+    source.error = REFUSED
+    with caplog.at_level(logging.DEBUG, logger="safety_ai.backend.config_sync"):
+        for _ in range(7):  # every 10 s for 60 s
+            assert sync.refresh() == []
+            fake_clock.advance(10.0)
+        assert sync.refresh("cam-1") == []  # a config.updated while refused
+        assert sync.unauthorized
+        assert sync.cached("cam-2") == loaded["cam-2"]  # the last good config is kept
+        source.error = None
+        source.configs["cam-1"] = config("cam-1", version=5)
+        assert sync.refresh() == ["cam-1"]
+    assert not sync.unauthorized
+    assert _refused_lines(caplog) == [
+        REFUSED_LINE,
+        f"{REFUSED_LINE} (5 similar refusals since the last report)",
+    ]
+    assert "configuration requests are authorized again; refreshing every 60 s" in caplog.text
+    assert [c.version for c in notified] == [5]
+
+
+def test_the_refresh_thread_retries_every_10_s_while_the_key_is_refused(
+    make_sync: Callable[..., ConfigSync],
+    source: FakeSource,
+    fake_clock: FakeClock,
+    notified: list[CameraConfig],
+    wait_until: Callable[..., bool],
+) -> None:
+    source.error = REFUSED
+    sync = make_sync(refresh_s=60.0)
+    assert sync.load_initial() == {}
+    assert sync.unauthorized
+    sync.start()
+    fake_clock.advance(9.0)
+    time.sleep(0.05)
+    assert source.call_list() == ["all"]  # not due yet
+    fake_clock.advance(2.0)
+    assert wait_until(lambda: source.call_list().count("all") == 2)
+    fake_clock.advance(10.0)
+    assert wait_until(lambda: source.call_list().count("all") == 3)
+    source.error = None  # the operator fixed the key
+    fake_clock.advance(10.0)
+    assert wait_until(lambda: source.call_list().count("all") == 4)
+    assert wait_until(lambda: not sync.unauthorized)
+    assert wait_until(lambda: sorted(c.camera.id for c in notified) == ["cam-1", "cam-2"])
+    fake_clock.advance(30.0)  # back to the regular 60 s pace
+    time.sleep(0.05)
+    assert source.call_list().count("all") == 4
+    fake_clock.advance(31.0)
+    assert wait_until(lambda: source.call_list().count("all") == 5)
+
+
+def test_a_refused_config_updated_refresh_shortens_the_wait(
+    make_sync: Callable[..., ConfigSync],
+    source: FakeSource,
+    fake_clock: FakeClock,
+    wait_until: Callable[..., bool],
+) -> None:
+    sync = make_sync(refresh_s=60.0)
+    sync.load_initial()
+    sync.start()
+    source.error = REFUSED_ONE
+    sync.request_refresh("cam-1")  # config.updated arrives right when the key is revoked
+    assert wait_until(lambda: sync.unauthorized)
+    source.error = None
+    fake_clock.advance(11.0)  # 10 s, not the 60 s refresh interval
+    assert wait_until(lambda: source.call_list().count("all") == 2)
+    assert wait_until(lambda: not sync.unauthorized)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"refresh_s": 0.0},
+        {"poll_s": 0.0},
+        {"refresh_s": -1.0},
+        {"auth_retry_s": 0.0},
+        {"auth_log_interval_s": -1.0},
+    ],
+)
 def test_invalid_settings_are_rejected(
     make_sync: Callable[..., ConfigSync], kwargs: dict[str, float]
 ) -> None:

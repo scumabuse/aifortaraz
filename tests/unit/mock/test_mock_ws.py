@@ -34,7 +34,9 @@ def _sync(client: Any, ws: Any) -> list[dict[str, Any]]:
             return replies[:-1]
 
 
-def test_valid_messages_are_recorded_without_replies(client: Any, payloads: Any, clock: Any) -> None:
+def test_valid_messages_are_recorded_without_replies(
+    client: Any, payloads: Any, clock: Any
+) -> None:
     with client.websocket_connect(WS_URL) as ws:
         _send(ws, payloads.detections())
         _send(ws, payloads.frame())
@@ -109,8 +111,9 @@ def test_binary_frames_are_violations(client: Any) -> None:
 
 @pytest.mark.parametrize("query", ["", "?api_key=wrong", "?key=test-key"])
 def test_connection_without_the_right_api_key_is_refused(anon_client: Any, query: str) -> None:
-    with pytest.raises(WebSocketDisconnect) as info, anon_client.websocket_connect(
-        f"/ws/ingest{query}", headers={"X-API-Key": "test-key"}
+    with (
+        pytest.raises(WebSocketDisconnect) as info,
+        anon_client.websocket_connect(f"/ws/ingest{query}", headers={"X-API-Key": "test-key"}),
     ):
         pass
     assert info.value.code == 1008
@@ -238,12 +241,19 @@ def test_ws_error_is_sent_to_connected_clients(client: Any) -> None:
 
 
 @pytest.mark.parametrize(
-    ("body", "content_type"),
-    [(b'{"message": ""}', "application/json"), (b'{"msg": "x"}', "application/json"), (b"x", "text/plain")],
+    ("body", "content_type", "status", "code"),
+    [
+        (b'{"message": ""}', "application/json", 422, "validation_error"),
+        (b'{"msg": "x"}', "application/json", 422, "validation_error"),
+        (b"x", "text/plain", 415, "unsupported_media_type"),
+    ],
 )
-def test_ws_error_body_validation(client: Any, body: bytes, content_type: str) -> None:
+def test_ws_error_body_validation(
+    client: Any, error_of: Any, body: bytes, content_type: str, status: int, code: str
+) -> None:
     response = client.post("/debug/ws-error", content=body, headers={"Content-Type": content_type})
-    assert response.status_code == 422
+    assert response.status_code == status
+    assert error_of(response)["code"] == code
 
 
 def test_disconnected_clients_are_forgotten(client: Any) -> None:

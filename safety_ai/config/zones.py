@@ -24,7 +24,7 @@ from typing import Any, Final
 
 from pydantic import ValidationError
 
-from safety_ai.backend.schemas import CameraConfig
+from safety_ai.backend.schemas import STRICT_ZONES, CameraConfig
 from safety_ai.config.loader import (
     ConfigError,
     format_validation_error,
@@ -125,7 +125,9 @@ def load_zones_file(path: Path, camera_id: str) -> CameraConfig:
         document = parse_yaml_document(text, source=source)
     payload = _camera_payload(document, camera_id, source)
     try:
-        return CameraConfig.model_validate(payload)
+        # A zones file is written by the operator: an invalid zone is an error, not skipped as
+        # in configurations received from the website (contract 4.4).
+        return CameraConfig.model_validate(payload, context={STRICT_ZONES: True})
     except ValidationError as exc:
         lines = format_validation_error(exc, model=CameraConfig)
         raise ConfigError([f"{source}: {line}" for line in lines]) from None

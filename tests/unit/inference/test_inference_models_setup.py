@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import httpx
@@ -17,9 +20,12 @@ from safety_ai.inference import models_setup
 from safety_ai.inference.models_setup import (
     SH17_METRICS_SOURCE,
     SetupOutcome,
+    check_models,
     download_file,
     ensure_weight,
     main,
+    render_check_table,
+    required_names,
     setup_models,
 )
 from safety_ai.inference.registry import ModelRegistry, RegistryError
@@ -525,8 +531,12 @@ def test_main_exit_codes(
     monkeypatch.setattr(models_setup, "setup_models", fake_setup)
     registry_path = tmp_path / "models" / "registry.json"
     assert main(["--registry", str(registry_path), "--skip-sh17"]) == 0
-    assert seen == [{"registry": registry_path, "models_dir": None, "skip_sh17": True}]
+    assert seen == [
+        {"registry": registry_path, "models_dir": None, "skip_sh17": True, "skip_exports": False}
+    ]
     assert quiet_logging and quiet_logging[0]["level"] == logging.INFO
+    assert main(["--registry", str(registry_path), "--skip-exports"]) == 0
+    assert seen[-1]["skip_exports"] is True
 
     def failing_setup(registry: ModelRegistry, **kwargs: Any) -> list[SetupOutcome]:
         return [
@@ -544,8 +554,348 @@ def test_main_exit_codes(
     assert main(["--registry", str(registry_path), "--models-dir", str(tmp_path)]) == 1
 
 
+def test_main_quiets_the_http_loggers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quiet_logging: list[dict[str, Any]]
+) -> None:
+    for name in ("httpx", "httpcore"):
+        monkeypatch.setattr(logging.getLogger(name), "level", logging.NOTSET)
+    monkeypatch.setattr(models_setup, "setup_models", lambda registry, **kwargs: [])
+    assert main(["--registry", str(tmp_path / "models" / "registry.json")]) == 0
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
+
+
 def test_main_help(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as info:
         main(["--help"])
     assert info.value.code == 0
-    assert "--skip-sh17" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "--skip-sh17" in out and "--check" in out and "--skip-exports" in out
+
+
+# --------------------------------------------------------------------------------------------
+# export regeneration (make models re-exports what the registry lists, D-025)
+# --------------------------------------------------------------------------------------------
+
+
+class RecordingExporter:
+    """An :data:`Exporter` that writes a fake artefact and registers it like ``export`` does."""
+
+    def __init__(self, *, skip: str | None = None, fail: bool = False) -> None:
+        self.calls: list[tuple[str, str, int]] = []
+        self.skip = skip
+        self.fail = fail
+
+    def __call__(self, registry: ModelRegistry, name: str, fmt: str, imgsz: int) -> str | None:
+        self.calls.append((name, fmt, imgsz))
+        if self.fail:
+            raise RuntimeError("onnx export crashed")
+        if self.skip is not None:
+            return self.skip
+        target = registry.root / "models" / f"{name}.{fmt}.regenerated"
+        target.write_bytes(f"{name} {fmt} {imgsz}".encode())
+        registry.add_export(name, fmt, target, created_at=T0, imgsz=imgsz)  # type: ignore[arg-type]
+        return None
+
+
+def _with_exports(registry: ModelRegistry) -> None:
+    """Register an ONNX (imgsz 320) and an OpenVINO export of ppe_s_sh17, both on disk."""
+    models = registry.root / "models"
+    (models / "ppe_s_sh17.onnx").write_bytes(b"onnx")
+    registry.add_export("ppe_s_sh17", "onnx", models / "ppe_s_sh17.onnx", created_at=T0, imgsz=320)
+    folder = models / "ppe_s_sh17_openvino_model"
+    folder.mkdir()
+    (folder / "ppe_s_sh17.xml").write_text("<net/>", encoding="utf-8")
+    registry.add_export("ppe_s_sh17", "openvino", folder, created_at=T0)
+
+
+def test_missing_exports_are_regenerated_at_their_recorded_size(
+    setup: Callable[..., list[SetupOutcome]], tmp_registry: ModelRegistry
+) -> None:
+    setup()
+    _with_exports(tmp_registry)
+    (tmp_registry.root / "models" / "ppe_s_sh17.onnx").unlink()
+    exporter = RecordingExporter()
+    outcomes = setup(exporter=exporter, runtime_available=lambda fmt: True)
+    assert exporter.calls == [("ppe_s_sh17", "onnx", 320)]
+    statuses = _statuses(outcomes)
+    assert statuses["ppe_s_sh17:onnx"] == "exported"
+    assert statuses["ppe_s_sh17:openvino"] == "unchanged"
+    exported = next(o for o in outcomes if o.name == "ppe_s_sh17:onnx")
+    assert exported.path == "models/ppe_s_sh17.onnx.regenerated"
+    assert "imgsz 320" in exported.detail
+    entry = tmp_registry.resolve("ppe_s_sh17")
+    assert tmp_registry.verify(entry, "onnx")
+
+
+def test_stale_exports_without_a_recorded_size_use_the_entry_size(
+    setup: Callable[..., list[SetupOutcome]], tmp_registry: ModelRegistry
+) -> None:
+    setup()
+    _with_exports(tmp_registry)
+    folder = tmp_registry.root / "models" / "ppe_s_sh17_openvino_model"
+    (folder / "ppe_s_sh17.xml").write_text("<changed/>", encoding="utf-8")
+    exporter = RecordingExporter()
+    setup(exporter=exporter, runtime_available=lambda fmt: True)
+    assert exporter.calls == [("ppe_s_sh17", "openvino", 640)]
+
+
+def test_exports_whose_runtime_is_missing_are_skipped(
+    setup: Callable[..., list[SetupOutcome]], tmp_registry: ModelRegistry
+) -> None:
+    setup()
+    _with_exports(tmp_registry)
+    (tmp_registry.root / "models" / "ppe_s_sh17.onnx").unlink()
+    exporter = RecordingExporter()
+    outcomes = setup(exporter=exporter, runtime_available=lambda fmt: fmt != "onnx")
+    assert exporter.calls == []
+    skipped = next(o for o in outcomes if o.name == "ppe_s_sh17:onnx")
+    assert skipped.status == "skipped"
+    assert "onnxruntime is not installed" in skipped.detail
+
+
+def test_exporter_skips_and_failures_are_reported(
+    setup: Callable[..., list[SetupOutcome]], tmp_registry: ModelRegistry
+) -> None:
+    setup()
+    _with_exports(tmp_registry)
+    (tmp_registry.root / "models" / "ppe_s_sh17.onnx").unlink()
+    skipping = RecordingExporter(skip="TensorRT needs a CUDA GPU")
+    outcomes = setup(exporter=skipping, runtime_available=lambda fmt: True)
+    assert _statuses(outcomes)["ppe_s_sh17:onnx"] == "skipped"
+    failing = RecordingExporter(fail=True)
+    outcomes = setup(exporter=failing, runtime_available=lambda fmt: True)
+    failed = next(o for o in outcomes if o.name == "ppe_s_sh17:onnx")
+    assert failed.status == "failed"
+    assert "RuntimeError: onnx export crashed" in failed.detail
+
+
+def test_skip_exports_leaves_exports_alone(
+    setup: Callable[..., list[SetupOutcome]], tmp_registry: ModelRegistry
+) -> None:
+    setup()
+    _with_exports(tmp_registry)
+    (tmp_registry.root / "models" / "ppe_s_sh17.onnx").unlink()
+    exporter = RecordingExporter()
+    outcomes = setup(exporter=exporter, skip_exports=True)
+    assert exporter.calls == []
+    assert not any(":" in o.name for o in outcomes)
+
+
+def test_main_fails_when_an_export_cannot_be_regenerated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quiet_logging: list[dict[str, Any]]
+) -> None:
+    monkeypatch.setattr(
+        models_setup,
+        "setup_models",
+        lambda registry, **kwargs: [
+            SetupOutcome("pose_n", "unchanged", "models/yolo26n-pose.pt", "ok"),
+            SetupOutcome("pose_n:onnx", "failed", "models/yolo26n-pose.onnx", "crashed"),
+            SetupOutcome("pose_n:tensorrt", "skipped", "models/yolo26n-pose.engine", "no trt"),
+        ],
+    )
+    assert main(["--registry", str(tmp_path / "models" / "registry.json")]) == 1
+
+
+def test_default_exporter_runs_the_training_export(
+    tmp_registry: ModelRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A stand-in for safety_ai.training.export (the real one imports torch and Ultralytics).
+    calls: list[dict[str, Any]] = []
+    answers = iter(
+        [
+            SimpleNamespace(artifacts=("m.onnx",), skipped=()),
+            SimpleNamespace(artifacts=(), skipped=(SimpleNamespace(reason="no CUDA"),)),
+            SimpleNamespace(artifacts=(), skipped=()),
+        ]
+    )
+
+    def fake_export(name: str, formats: Any, **kwargs: Any) -> SimpleNamespace:
+        calls.append({"name": name, "formats": formats, **kwargs})
+        return next(answers)
+
+    fake_module = ModuleType("safety_ai.training.export")
+    fake_module.export = fake_export  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "safety_ai.training.export", fake_module)
+    default = models_setup._export_with_ultralytics
+    assert default(tmp_registry, "m", "onnx", 320) is None
+    assert calls[0] == {
+        "name": "m",
+        "formats": ("onnx",),
+        "imgsz": 320,
+        "device": "cpu",
+        "registry": tmp_registry,
+    }
+    assert default(tmp_registry, "m", "tensorrt", 640) == "no CUDA"
+    with pytest.raises(RuntimeError, match="no openvino export of m was produced"):
+        default(tmp_registry, "m", "openvino", 640)
+
+
+# --------------------------------------------------------------------------------------------
+# --check
+# --------------------------------------------------------------------------------------------
+
+
+def test_check_passes_for_a_complete_registry(
+    setup: Callable[..., list[SetupOutcome]], tmp_registry: ModelRegistry
+) -> None:
+    setup()
+    _with_exports(tmp_registry)
+    report = check_models(tmp_registry, required=required_names())
+    assert report.passed
+    assert [(r.name, r.format, r.status) for r in report.rows] == [
+        ("vehicle_n", "pt", "ok"),
+        ("vehicle_s", "pt", "ok"),
+        ("pose_n", "pt", "ok"),
+        ("ppe_n_sh17", "pt", "ok"),
+        ("ppe_s_sh17", "pt", "ok"),
+        ("ppe_s_sh17", "onnx", "ok"),
+        ("ppe_s_sh17", "openvino", "ok"),
+    ]
+    onnx = report.rows[5]
+    assert (onnx.artefact, onnx.path, onnx.size_bytes) == ("export", "models/ppe_s_sh17.onnx", 4)
+    assert onnx.actual_sha256 == onnx.expected_sha256 == hashlib.sha256(b"onnx").hexdigest()
+    folder = report.rows[6]
+    assert folder.size_bytes == len("<net/>")
+    assert report.count("ok") == 7
+
+
+def test_check_reports_missing_and_mismatching_files(
+    setup: Callable[..., list[SetupOutcome]], tmp_registry: ModelRegistry
+) -> None:
+    setup()
+    _with_exports(tmp_registry)
+    models = tmp_registry.root / "models"
+    (models / "yolo26s.pt").unlink()
+    (models / "yolo26n.pt").write_bytes(b"tampered")
+    (models / "ppe_s_sh17.onnx").unlink()
+    report = check_models(tmp_registry, required=required_names(), runtime_available=lambda f: True)
+    assert not report.passed
+    by_key = {(r.name, r.format): r for r in report.rows}
+    assert by_key[("vehicle_s", "pt")].status == "missing"
+    assert by_key[("vehicle_s", "pt")].actual_sha256 is None
+    tampered = by_key[("vehicle_n", "pt")]
+    assert tampered.status == "mismatch"
+    assert tampered.actual_sha256 == hashlib.sha256(b"tampered").hexdigest()
+    assert "run python -m safety_ai.inference.models_setup" in tampered.detail
+    assert by_key[("ppe_s_sh17", "onnx")].status == "missing"
+
+
+def test_check_skips_unusable_exports_but_not_their_weights(
+    setup: Callable[..., list[SetupOutcome]], tmp_registry: ModelRegistry
+) -> None:
+    setup()
+    _with_exports(tmp_registry)
+    (tmp_registry.root / "models" / "ppe_s_sh17.onnx").unlink()
+    report = check_models(
+        tmp_registry, required=required_names(), runtime_available=lambda f: False
+    )
+    assert report.passed
+    onnx = next(r for r in report.rows if r.format == "onnx")
+    assert onnx.status == "skipped" and onnx.usable
+    assert "onnxruntime is not installed" in onnx.detail
+    openvino = next(r for r in report.rows if r.format == "openvino")
+    assert openvino.status == "ok"  # a valid export is reported as ok whatever the runtime
+    (tmp_registry.root / "models" / "ppe_s_sh17.pt").unlink()
+    report = check_models(
+        tmp_registry, required=required_names(), runtime_available=lambda f: False
+    )
+    assert not report.passed
+
+
+def test_check_requires_the_setup_entries(tmp_registry: ModelRegistry) -> None:
+    report = check_models(tmp_registry, required=required_names(skip_sh17=True))
+    assert not report.passed
+    assert [(r.name, r.status) for r in report.rows] == [
+        ("vehicle_n", "unregistered"),
+        ("vehicle_s", "unregistered"),
+        ("pose_n", "unregistered"),
+    ]
+    assert check_models(tmp_registry).passed  # nothing registered, nothing required
+    assert required_names() == ("vehicle_n", "vehicle_s", "pose_n", "ppe_n_sh17", "ppe_s_sh17")
+
+
+def test_render_check_table(
+    setup: Callable[..., list[SetupOutcome]], tmp_registry: ModelRegistry
+) -> None:
+    setup(skip_sh17=True)
+    (tmp_registry.root / "models" / "yolo26s.pt").unlink()
+    report = check_models(tmp_registry, required=required_names())
+    lines = render_check_table(report).splitlines()
+    assert lines[0].split() == [
+        "name",
+        "role",
+        "format",
+        "path",
+        "size",
+        "sha256",
+        "status",
+        "detail",
+    ]
+    digest = hashlib.sha256(_payload("yolo26n.pt")).hexdigest()[:12]
+    expected = ["vehicle_n", "vehicle", "pt", "models/yolo26n.pt", "0.1", "MB", digest, "ok"]
+    assert lines[1].split() == expected
+    status_column = lines[0].index("status")
+    assert lines[1][status_column:] == "ok"
+    detail_column = lines[0].index("detail")
+    assert lines[2][status_column:detail_column].strip() == "missing"
+    assert lines[2][detail_column:].startswith("file not found; run python -m")
+    assert lines[4][status_column:detail_column].strip() == "unregistered"
+    assert lines[4][detail_column:].startswith("required entry is not in the registry")
+    assert lines[-1] == f"FAILED: {tmp_registry.path.as_posix()}: 2 ok, 0 skipped, 3 problem(s)"
+
+
+def test_main_check_prints_the_table_and_sets_the_exit_code(
+    setup: Callable[..., list[SetupOutcome]],
+    tmp_registry: ModelRegistry,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup()
+
+    def no_setup(registry: ModelRegistry, **kwargs: Any) -> list[SetupOutcome]:
+        raise AssertionError("--check must not run the setup")
+
+    monkeypatch.setattr(models_setup, "setup_models", no_setup)
+    assert main(["--check", "--registry", str(tmp_registry.path)]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[-1].startswith("PASSED:")
+    assert "ppe_s_sh17" in out
+    (tmp_registry.root / "models" / "ppe_s_sh17.pt").unlink()
+    assert main(["--check", "--registry", str(tmp_registry.path)]) == 1
+    assert capsys.readouterr().out.splitlines()[-1].startswith("FAILED:")
+    assert main(["--check", "--skip-sh17", "--registry", str(tmp_registry.path)]) == 1
+
+
+def test_main_check_requires_the_sh17_entries_unless_skipped(
+    setup: Callable[..., list[SetupOutcome]],
+    tmp_registry: ModelRegistry,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    setup(skip_sh17=True)
+    assert main(["--check", "--registry", str(tmp_registry.path)]) == 1
+    assert "ppe_n_sh17" in capsys.readouterr().out
+    assert main(["--check", "--skip-sh17", "--registry", str(tmp_registry.path)]) == 0
+
+
+def test_main_check_reports_an_invalid_registry(
+    tmp_registry: ModelRegistry, capsys: pytest.CaptureFixture[str]
+) -> None:
+    tmp_registry.path.write_text("{not json", encoding="utf-8")
+    assert main(["--check", "--registry", str(tmp_registry.path)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "model check failed" in captured.err and "not valid JSON" in captured.err
+
+
+def test_check_imports_no_model_runtime(tmp_path: Path) -> None:
+    code = (
+        "import sys; from safety_ai.inference import models_setup as m; "
+        f"rc = m.main(['--check', '--registry', {str(tmp_path / 'models' / 'registry.json')!r}]); "
+        "heavy = [n for n in ('torch', 'ultralytics', 'cv2', 'onnxruntime', 'openvino') "
+        "if n in sys.modules]; print(rc, heavy)"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert done.stdout.strip().splitlines()[-1] == "1 []", done.stderr

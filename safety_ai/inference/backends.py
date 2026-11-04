@@ -15,7 +15,7 @@ Public API:
   :func:`read_bench_fps`
 * :func:`half_keyword`, :func:`precision_kwargs`
 * :class:`LoadedModel`, :func:`load_model`, :func:`load_yolo`, :data:`ModelLoader`,
-  :func:`tensor_to_list`
+  :func:`pin_device`, :func:`tensor_to_list`
 """
 
 from __future__ import annotations
@@ -52,6 +52,7 @@ __all__ = [
     "half_keyword",
     "load_model",
     "load_yolo",
+    "pin_device",
     "precision_kwargs",
     "read_bench_fps",
     "resolve_device",
@@ -71,6 +72,11 @@ _RUNTIME_MODULES: Final[Mapping[str, str]] = {
     "openvino": "openvino",
     "tensorrt": "tensorrt",
 }
+_ONNX_DEVICE_PROVIDERS: Final[Mapping[str, str]] = {
+    "cuda": "CUDAExecutionProvider",
+    "mps": "CoreMLExecutionProvider",
+}
+"""ONNX Runtime execution provider Ultralytics uses for each non-CPU device class."""
 _CUDA_RE: Final = re.compile(r"^(?:cuda(?::(\d+))?|(\d+))$")
 _HALF_FP16: Final[int] = 16
 
@@ -113,6 +119,16 @@ def _module_importable(name: str) -> bool:
     except Exception:  # ImportError, OSError (DLL load), RuntimeError from native init
         return False
     return True
+
+
+def _onnx_providers() -> frozenset[str]:
+    """Execution providers of the installed ONNX Runtime (empty when it does not import)."""
+    try:
+        import onnxruntime  # noqa: PLC0415  (lazy: optional native runtime)
+
+        return frozenset(onnxruntime.get_available_providers())
+    except Exception:  # ImportError, OSError (DLL load), RuntimeError from native init
+        return frozenset()
 
 
 def _default_cfg_keys() -> Collection[str]:
@@ -188,9 +204,16 @@ def artifact_path(entry: RegistryEntry, backend: str, root: Path) -> Path | None
 def available_backends(entry: RegistryEntry, device: str, *, root: Path | None = None) -> list[str]:
     """List the backends that can run ``entry`` on ``device``, in :data:`BACKENDS` order.
 
+    A backend counts only when it really runs on ``device``, so measurements, the backend
+    choice and the reported device never describe a run that silently happened elsewhere:
+
     * ``pt``: always, for entries whose primary format is ``pt``;
-    * ``onnx``: when onnxruntime imports and the ONNX export exists;
-    * ``openvino``: when openvino imports and the OpenVINO export exists;
+    * ``onnx``: when onnxruntime imports and the ONNX export exists; on a CUDA device only with
+      ONNX Runtime's ``CUDAExecutionProvider`` and on MPS only with ``CoreMLExecutionProvider``
+      (without them Ultralytics would fall back to the CPU after trying to pip-install
+      ``onnxruntime-gpu``);
+    * ``openvino``: when openvino imports, the OpenVINO export exists and ``device`` is the CPU
+      (Ultralytics runs OpenVINO on the CPU whatever torch device is requested);
     * ``tensorrt``: when tensorrt imports, CUDA is available, ``device`` is a CUDA device and
       the ``.engine`` exists.
 
@@ -201,9 +224,22 @@ def available_backends(entry: RegistryEntry, device: str, *, root: Path | None =
     return list(_runnable_artifacts(entry, device, base))
 
 
+def _runs_on(backend: str, dclass: DeviceClass) -> bool:
+    """True when an importable ``backend`` runtime executes on devices of class ``dclass``."""
+    if backend == "openvino":
+        return dclass == "cpu"
+    if backend == "tensorrt":
+        return dclass == "cuda" and _cuda_available()
+    if backend == "onnx" and dclass != "cpu":
+        provider = _ONNX_DEVICE_PROVIDERS[dclass]
+        return provider in _onnx_providers()
+    return True
+
+
 def _runnable_artifacts(entry: RegistryEntry, device: str, root: Path) -> dict[str, Path]:
     """Backend -> artefact path for every backend that can run ``entry`` on ``device``."""
     found: dict[str, Path] = {}
+    dclass = device_class(device)
     for backend in BACKENDS:
         path = artifact_path(entry, backend, root)
         if path is None:
@@ -213,9 +249,8 @@ def _runnable_artifacts(entry: RegistryEntry, device: str, root: Path) -> dict[s
             continue
         if not path.exists() or not _module_importable(_RUNTIME_MODULES[backend]):
             continue
-        if backend == "tensorrt" and (device_class(device) != "cuda" or not _cuda_available()):
-            continue
-        found[backend] = path
+        if _runs_on(backend, dclass):
+            found[backend] = path
     return found
 
 
@@ -286,15 +321,29 @@ def choose_backend(
         chosen = requested
     else:
         _LOG.warning(
-            "backend %r is not available for model %s on %s (available: %s); using %s",
+            "backend %r is not available for model %s on %s (available: %s)%s; using %s",
             requested,
             entry.name,
             device,
             ", ".join(available),
+            _unavailable_hint(requested, device),
             fallback,
         )
         chosen = fallback
     return chosen, runnable[chosen]
+
+
+def _unavailable_hint(backend: str, device: str) -> str:
+    """Why ``backend`` cannot run on ``device`` when its runtime is device-bound, else ''."""
+    dclass = device_class(device)
+    if backend == "openvino" and dclass != "cpu":
+        return "; OpenVINO runs on the CPU, set models.device: cpu to use it"
+    if backend == "onnx" and dclass != "cpu":
+        provider = _ONNX_DEVICE_PROVIDERS[dclass]
+        return f"; ONNX Runtime has no {provider} here, set models.device: cpu to use it"
+    if backend == "tensorrt" and dclass != "cuda":
+        return "; TensorRT needs a CUDA device"
+    return ""
 
 
 def half_keyword() -> str:
@@ -364,6 +413,20 @@ class LoadedModel:
         )
 
 
+def pin_device(model: Any, device: str) -> None:
+    """Make ``device`` the default device of an Ultralytics model object.
+
+    Ultralytics builds a throw-away predictor on its own default device (CUDA when present) when
+    ``model.names`` is read on an exported model before the first prediction; on a CUDA machine
+    the ONNX backend then requires ``onnxruntime-gpu`` and tries to pip-install it. Setting
+    ``overrides["device"]`` makes that predictor (and any call without ``device=``) use the
+    device the model was loaded for. Objects without an ``overrides`` dict are left untouched.
+    """
+    overrides = getattr(model, "overrides", None)
+    if isinstance(overrides, dict):
+        overrides["device"] = device
+
+
 def _check_class_count(entry: RegistryEntry, model: Any) -> None:
     """The registry's class mapping must cover exactly the model's classes."""
     names = getattr(model, "names", None)
@@ -406,6 +469,7 @@ def load_model(
     if verify and not registry.verify(entry, chosen):
         _LOG.warning("sha256 of %s does not match the registry entry %s", path, entry.name)
     model = (loader or load_yolo)(path, task)
+    pin_device(model, device)
     _check_class_count(entry, model)
     _LOG.info("loaded model %s (%s) on %s from %s", entry.name, chosen, device, path)
     return LoadedModel(entry=entry, backend=chosen, path=path, device=device, model=model)

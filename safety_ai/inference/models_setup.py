@@ -1,7 +1,7 @@
-"""Download and register the runtime models (spec 5.3, 6.2, 6.7; DECISIONS.md D-008, D-025).
+"""Download, register and check the runtime models (spec 5.3, 6.2, 6.7; D-008, D-025).
 
-Run as ``python -m safety_ai.inference.models_setup [--skip-sh17]``. Into ``models/`` it
-downloads:
+Run as ``python -m safety_ai.inference.models_setup [--skip-sh17] [--skip-exports]`` (this is
+``make models``). Into ``models/`` it downloads:
 
 * ``yolo26n.pt``, ``yolo26s.pt`` (COCO detectors) and ``yolo26n-pose.pt`` (COCO-17 pose) from
   the Ultralytics assets release; when a YOLO26 file cannot be downloaded after 3 attempts (or
@@ -12,21 +12,36 @@ downloads:
 It then registers ``vehicle_n``, ``vehicle_s``, ``pose_n``, ``ppe_n_sh17`` and ``ppe_s_sh17`` in
 ``models/registry.json``. SH17 class names are verified against ``datasets/taxonomy.yaml``
 before they are mapped onto the unified taxonomy; COCO models map person -> person and
-car/truck/bus -> vehicle.
+car/truck/bus -> vehicle. Finally every export listed in the registry (ONNX, OpenVINO and
+TensorRT files are git-ignored, D-025) whose file is missing or does not match its sha256 is
+regenerated with :func:`safety_ai.training.export.export` at its recorded size; an export whose
+runtime is not installed here is reported as skipped (``--skip-exports`` disables this step).
 
 The command is idempotent: a file whose SHA-256 matches its registry entry is neither
 downloaded nor re-registered (so ``created_at``, exports and measured metrics are preserved).
 Every download uses connect/read timeouts and an overall deadline, writes ``<file>.part`` and
 moves it into place with :func:`os.replace`; it is tried 3 times before falling back or skipping
-with a clear message. The exit code is 0 when every requested model is registered, else 1.
+with a clear message. The exit code is 0 when every requested model is registered and no export
+failed, else 1.
 
-Public API: :func:`download_file`, :func:`ensure_weight`, :func:`setup_models`, :func:`main`,
-:class:`SetupOutcome` and the URL/spec constants.
+``--check`` (used by ``docker/entrypoint.sh`` before ``make models``) downloads nothing and
+imports neither torch nor Ultralytics: it verifies that every required entry is registered and
+that every registered artefact (weights and listed exports) exists with a matching sha256,
+prints one table row per artefact and exits with 0 when everything is usable, else 1. An export
+that is missing or stale while its runtime (onnxruntime, openvino, tensorrt) is not installed is
+reported as ``skipped``: it can neither run nor be regenerated on this machine, so it never makes
+the check (and thereby every container start) fail.
+
+Public API: :func:`download_file`, :func:`ensure_weight`, :func:`setup_models`,
+:func:`regenerate_exports`, :func:`check_models`, :func:`render_check_table`,
+:func:`required_names`, :func:`main`, :class:`SetupOutcome`, :class:`CheckRow`,
+:class:`CheckReport`, :data:`Exporter` and the URL/spec constants.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import logging
 import os
 import sys
@@ -48,6 +63,7 @@ from safety_ai.inference.registry import (
     class_names,
     coco_classes,
     sha256_file,
+    sha256_path,
 )
 from safety_ai.inference.types import PERSON_LABEL
 from safety_ai.taxonomy import SourceMapping, load_taxonomy
@@ -56,19 +72,28 @@ __all__ = [
     "COCO_MODELS",
     "DEFAULT_TIMEOUT",
     "DOWNLOAD_ATTEMPTS",
+    "EXPORT_RUNTIMES",
     "MIN_WEIGHT_BYTES",
     "SH17_METRICS",
     "SH17_METRICS_SOURCE",
     "SH17_MODELS",
     "SH17_RELEASE_URL",
     "ULTRALYTICS_ASSETS_URL",
+    "CheckReport",
+    "CheckRow",
+    "CheckStatus",
     "CocoSpec",
     "DownloadError",
+    "Exporter",
     "SetupOutcome",
     "Sh17Spec",
+    "check_models",
     "download_file",
     "ensure_weight",
     "main",
+    "regenerate_exports",
+    "render_check_table",
+    "required_names",
     "setup_models",
 ]
 
@@ -116,8 +141,22 @@ _SH17_TRAINED_ON: Final[str] = (
     "SH17 (Ahmad & Rahimi; 8,099 images, 17 classes; CC BY-NC-SA 4.0); weights from "
     "github.com/ahmadmughees/SH17dataset release v1"
 )
+EXPORT_RUNTIMES: Final[Mapping[str, str]] = {
+    "onnx": "onnxruntime",
+    "openvino": "openvino",
+    "tensorrt": "tensorrt",
+}
+"""Export format -> the Python module that runs it (an export is unusable without it)."""
+_QUIET_LOGGERS: Final[tuple[str, ...]] = ("httpx", "httpcore")
+"""Their INFO lines print every redirect URL, including GitHub's signed asset URLs."""
+_SETUP_HINT: Final[str] = "python -m safety_ai.inference.models_setup"
 
-Status = Literal["registered", "unchanged", "failed"]
+Status = Literal["registered", "unchanged", "exported", "skipped", "failed"]
+CheckStatus = Literal["ok", "skipped", "missing", "mismatch", "unregistered"]
+
+Exporter = Callable[[ModelRegistry, str, str, int], "str | None"]
+"""``(registry, entry name, format, imgsz) -> None`` after exporting and registering the
+artefact, or the reason the format cannot be produced on this machine; raises on failure."""
 
 
 class DownloadError(RuntimeError):
@@ -159,12 +198,52 @@ SH17_MODELS: Final[tuple[Sh17Spec, ...]] = (
 
 @dataclass(frozen=True, slots=True)
 class SetupOutcome:
-    """What happened to one registry entry during setup."""
+    """What happened to one registry entry (``name``) or export (``name:format``) in setup."""
 
     name: str
     status: Status
     path: str | None
     detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class CheckRow:
+    """The check of one registered artefact, or of a required entry that is not registered."""
+
+    name: str
+    role: str
+    artefact: str
+    """``weights`` (the entry's primary file) or ``export``."""
+    format: str
+    path: str | None
+    """POSIX path relative to the repository root (None: not registered)."""
+    size_bytes: int | None
+    expected_sha256: str | None
+    actual_sha256: str | None
+    status: CheckStatus
+    detail: str
+
+    @property
+    def usable(self) -> bool:
+        """True when the row does not fail the check (``ok`` or ``skipped``)."""
+        return self.status in ("ok", "skipped")
+
+
+@dataclass(frozen=True, slots=True)
+class CheckReport:
+    """Outcome of :func:`check_models`."""
+
+    registry: Path
+    rows: tuple[CheckRow, ...]
+
+    @property
+    def passed(self) -> bool:
+        """True when every row is usable (an empty registry with no requirement passes)."""
+        return all(row.usable for row in self.rows)
+
+    def count(self, status: CheckStatus) -> int:
+        """Number of rows with ``status``."""
+        return sum(1 for row in self.rows if row.status == status)
 
 
 def _new_client(timeout: httpx.Timeout) -> httpx.Client:
@@ -448,22 +527,97 @@ class _Setup:
         return self._register(entry, existing)
 
 
+def _runtime_installed(fmt: str) -> bool:
+    """True when the module that runs ``fmt`` exports is installed (located, not imported)."""
+    module = EXPORT_RUNTIMES.get(fmt)
+    return module is not None and importlib.util.find_spec(module) is not None
+
+
+def _export_with_ultralytics(
+    registry: ModelRegistry, name: str, fmt: str, imgsz: int
+) -> str | None:
+    """Default :data:`Exporter`: :func:`safety_ai.training.export.export` (TensorRT on CUDA).
+
+    Raises:
+        RuntimeError: When Ultralytics reports success but produced no artefact.
+    """
+    from safety_ai.training.export import export  # noqa: PLC0415  (heavy: torch, ultralytics)
+
+    result = export(name, (fmt,), imgsz=imgsz, device="cpu", registry=registry)
+    if result.artifacts:
+        return None
+    if result.skipped:
+        return result.skipped[0].reason
+    raise RuntimeError(f"no {fmt} export of {name} was produced")
+
+
+def regenerate_exports(
+    registry: ModelRegistry,
+    *,
+    exporter: Exporter | None = None,
+    runtime_available: Callable[[str], bool] | None = None,
+) -> list[SetupOutcome]:
+    """Regenerate every listed export whose file is missing or does not match its sha256.
+
+    Exports are git-ignored (D-025), so a fresh clone lists them without having them. Each one is
+    re-created at its recorded ``imgsz`` (the entry's when none was recorded) and re-registered
+    with its new digest by ``exporter``. One outcome per listed export: ``unchanged`` (valid),
+    ``exported``, ``skipped`` (its runtime is not installed here, or the exporter cannot produce
+    the format on this machine) or ``failed`` (the export raised).
+    """
+    export_one = exporter or _export_with_ultralytics
+    installed = runtime_available or _runtime_installed
+    outcomes: list[SetupOutcome] = []
+    for entry in registry.entries():
+        for fmt, record in entry.exports.items():
+            label = f"{entry.name}:{fmt}"
+            if registry.verify(entry, fmt):
+                outcomes.append(SetupOutcome(label, "unchanged", record.path, "sha256 matches"))
+                continue
+            if not installed(fmt):
+                runtime = EXPORT_RUNTIMES.get(fmt, fmt)
+                detail = f"missing or stale, but {runtime} is not installed here"
+                outcomes.append(SetupOutcome(label, "skipped", record.path, detail))
+                continue
+            imgsz = record.imgsz or entry.imgsz
+            try:
+                reason = export_one(registry, entry.name, fmt, imgsz)
+            except Exception as exc:  # exporter failures vary (Ultralytics, onnx, openvino, trt)
+                detail = f"re-export failed: {type(exc).__name__}: {exc}"
+                outcomes.append(SetupOutcome(label, "failed", record.path, detail))
+                continue
+            if reason is not None:
+                outcomes.append(SetupOutcome(label, "skipped", record.path, reason))
+                continue
+            updated = registry.get(entry.name)
+            exports = updated.exports.items() if updated is not None else ()
+            new_record = next((r for f, r in exports if f == fmt), record)
+            detail = f"regenerated at imgsz {imgsz}, sha256 {new_record.sha256[:12]}"
+            outcomes.append(SetupOutcome(label, "exported", new_record.path, detail))
+    return outcomes
+
+
 def setup_models(
     registry: ModelRegistry,
     *,
     models_dir: Path | None = None,
     skip_sh17: bool = False,
+    skip_exports: bool = False,
     client: httpx.Client | None = None,
     loader: ModelLoader | None = None,
     clock: Clock | None = None,
     attempts: int = DOWNLOAD_ATTEMPTS,
     sleep: Callable[[float], None] = time.sleep,
     taxonomy_path: Path | None = None,
+    exporter: Exporter | None = None,
+    runtime_available: Callable[[str], bool] | None = None,
 ) -> list[SetupOutcome]:
-    """Download and register every runtime model; returns one outcome per registry entry.
+    """Download and register every runtime model, then regenerate the registered exports.
 
-    ``models_dir`` defaults to the registry file's directory and must lie inside the repository
-    root. ``client``, ``loader`` and ``clock`` are injectable for tests.
+    Returns one outcome per registry entry, followed (unless ``skip_exports``) by one outcome per
+    export listed in the registry (see :func:`regenerate_exports`). ``models_dir`` defaults to
+    the registry file's directory and must lie inside the repository root. ``client``,
+    ``loader``, ``clock``, ``exporter`` and ``runtime_available`` are injectable for tests.
     """
     target_dir = Path(models_dir) if models_dir is not None else registry.path.parent
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -486,7 +640,168 @@ def setup_models(
     finally:
         if client is None:
             http.close()
+    if not skip_exports:
+        outcomes.extend(
+            regenerate_exports(registry, exporter=exporter, runtime_available=runtime_available)
+        )
     return outcomes
+
+
+# --------------------------------------------------------------------------------------------
+# --check
+# --------------------------------------------------------------------------------------------
+
+
+def required_names(*, skip_sh17: bool = False) -> tuple[str, ...]:
+    """The entry names :func:`setup_models` registers (the SH17 ones unless ``skip_sh17``)."""
+    names = [spec.name for spec in COCO_MODELS]
+    if not skip_sh17:
+        names.extend(spec.name for spec in SH17_MODELS)
+    return tuple(names)
+
+
+def _size_bytes(path: Path) -> int:
+    """Size of a file, or the total size of the files in a directory tree."""
+    if path.is_dir():
+        return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+    return path.stat().st_size
+
+
+def _check_artefact(
+    registry: ModelRegistry,
+    entry: RegistryEntry,
+    fmt: str | None,
+    *,
+    rel: str,
+    expected: str,
+    installed: Callable[[str], bool],
+) -> CheckRow:
+    """Check the weights (``fmt`` None) or the ``fmt`` export of ``entry``."""
+    path = registry.resolve_path(entry, fmt)
+    actual: str | None = None
+    size: int | None = None
+    status: CheckStatus = "missing"
+    detail = "file not found"
+    if path.exists():
+        actual, size = sha256_path(path), _size_bytes(path)
+        status = "ok" if actual == expected else "mismatch"
+        detail = "" if status == "ok" else f"sha256 differs from the registered {expected[:12]}"
+    if status != "ok" and fmt is not None and not installed(fmt):
+        runtime = EXPORT_RUNTIMES.get(fmt, fmt)
+        status = "skipped"
+        detail = f"{detail}; {runtime} is not installed, so it can neither run nor be rebuilt here"
+    elif status != "ok":
+        detail = f"{detail}; run {_SETUP_HINT}"
+    return CheckRow(
+        name=entry.name,
+        role=entry.role,
+        artefact="weights" if fmt is None else "export",
+        format=entry.format if fmt is None else fmt,
+        path=rel,
+        size_bytes=size,
+        expected_sha256=expected,
+        actual_sha256=actual,
+        status=status,
+        detail=detail,
+    )
+
+
+def check_models(
+    registry: ModelRegistry,
+    *,
+    required: Sequence[str] = (),
+    runtime_available: Callable[[str], bool] | None = None,
+) -> CheckReport:
+    """Verify the registered artefacts without downloading or importing any model runtime.
+
+    Rows follow the registry order (each entry's weights, then its exports), then one
+    ``unregistered`` row per name of ``required`` that is not an entry. A missing or stale
+    export whose runtime is not installed (``runtime_available``, default: the module of
+    :data:`EXPORT_RUNTIMES` can be found) is ``skipped`` instead of failing.
+
+    Raises:
+        RegistryError: When the registry file exists but is not a valid registry.
+    """
+    installed = runtime_available or _runtime_installed
+    entries = registry.entries()
+    rows: list[CheckRow] = []
+    for entry in entries:
+        rows.append(
+            _check_artefact(
+                registry, entry, None, rel=entry.path, expected=entry.sha256, installed=installed
+            )
+        )
+        rows.extend(
+            _check_artefact(
+                registry, entry, fmt, rel=record.path, expected=record.sha256, installed=installed
+            )
+            for fmt, record in entry.exports.items()
+        )
+    registered = {entry.name for entry in entries}
+    rows.extend(
+        CheckRow(
+            name=name,
+            role="-",
+            artefact="weights",
+            format="-",
+            path=None,
+            size_bytes=None,
+            expected_sha256=None,
+            actual_sha256=None,
+            status="unregistered",
+            detail=f"required entry is not in the registry; run {_SETUP_HINT}",
+        )
+        for name in dict.fromkeys(required)
+        if name not in registered
+    )
+    return CheckReport(registry=registry.path, rows=tuple(rows))
+
+
+def _format_size(size: int | None) -> str:
+    """Human-readable size in MB (a dash when unknown)."""
+    return "-" if size is None else f"{size / 1e6:.1f} MB"
+
+
+def render_check_table(report: CheckReport) -> str:
+    """Render a check report as an aligned plain-text table plus a verdict line."""
+    header = ("name", "role", "format", "path", "size", "sha256", "status", "detail")
+    body = [
+        (
+            row.name,
+            row.role,
+            row.format,
+            row.path or "-",
+            _format_size(row.size_bytes),
+            (row.actual_sha256 or row.expected_sha256 or "-")[:12],
+            row.status,
+            row.detail,
+        )
+        for row in report.rows
+    ]
+    widths = [max(len(cells[i]) for cells in (header, *body)) for i in range(len(header) - 1)]
+    lines = [
+        "  ".join(cell.ljust(width) for cell, width in zip(cells[:-1], widths, strict=True))
+        + ("  " + cells[-1] if cells[-1] else "")
+        for cells in (header, *body)
+    ]
+    problems = sum(1 for row in report.rows if not row.usable)
+    verdict = "PASSED" if report.passed else "FAILED"
+    lines.append(
+        f"{verdict}: {report.registry.as_posix()}: {report.count('ok')} ok, "
+        f"{report.count('skipped')} skipped, {problems} problem(s)"
+    )
+    return "\n".join(line.rstrip() for line in lines) + "\n"
+
+
+def _run_check(registry: ModelRegistry, *, skip_sh17: bool) -> int:
+    """``--check``: print the table to stdout; 0 when the check passed, else 1."""
+    try:
+        report = check_models(registry, required=required_names(skip_sh17=skip_sh17))
+    except (RegistryError, OSError) as exc:
+        sys.stderr.write(f"model check failed: {exc}\n")
+        return 1
+    sys.stdout.write(render_check_table(report))
+    return 0 if report.passed else 1
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -494,9 +809,21 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m safety_ai.inference.models_setup",
         description="Download the YOLO26 (fallback YOLO11) COCO/pose weights and the SH17 PPE "
-        "weights into models/ and register them in models/registry.json.",
+        "weights into models/, register them in models/registry.json and regenerate the "
+        "registered exports; or, with --check, only verify what is registered.",
     )
     parser.add_argument("--skip-sh17", action="store_true", help="do not fetch the SH17 weights")
+    parser.add_argument(
+        "--skip-exports",
+        action="store_true",
+        help="do not regenerate missing or stale ONNX/OpenVINO/TensorRT exports",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="download nothing: verify every registered file (weights and exports) against its "
+        "sha256 and that every required entry is registered; print a table; exit 0 or 1",
+    )
     parser.add_argument(
         "--registry",
         type=Path,
@@ -513,23 +840,32 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the setup from the command line; returns the process exit code."""
+    """Run the setup (or ``--check``) from the command line; returns the process exit code."""
     args = _parser().parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s", stream=sys.stdout)
     registry = ModelRegistry(args.registry)
+    if args.check:
+        return _run_check(registry, skip_sh17=args.skip_sh17)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s", stream=sys.stdout)
+    for name in _QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
     try:
-        outcomes = setup_models(registry, models_dir=args.models_dir, skip_sh17=args.skip_sh17)
+        outcomes = setup_models(
+            registry,
+            models_dir=args.models_dir,
+            skip_sh17=args.skip_sh17,
+            skip_exports=args.skip_exports,
+        )
     except (RegistryError, OSError, ValueError) as exc:
         _LOG.error("model setup failed: %s", exc)
         return 1
     for outcome in outcomes:
         level = logging.ERROR if outcome.status == "failed" else logging.INFO
         _LOG.log(
-            level, "%-11s %-10s %s (%s)", outcome.name, outcome.status, outcome.path, outcome.detail
+            level, "%-16s %-10s %s (%s)", outcome.name, outcome.status, outcome.path, outcome.detail
         )
     failed = [o.name for o in outcomes if o.status == "failed"]
     if failed:
-        _LOG.error("not registered: %s", ", ".join(failed))
+        _LOG.error("failed: %s", ", ".join(failed))
         return 1
     _LOG.info("registry %s is complete: %s", registry.path, ", ".join(registry.names()))
     return 0

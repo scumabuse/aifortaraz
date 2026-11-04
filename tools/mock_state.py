@@ -15,12 +15,17 @@ decision lives here so it can be unit-tested without HTTP:
 * :class:`WsHub` - connected WebSocket clients and thread-safe broadcasts;
 * :class:`DataStore` - ``<data_dir>/events.jsonl`` and ``<data_dir>/snapshots/<external_id>.jpg``.
 
+Every error response body is the contract's ``{"error": {"code", "message", "details"}}``
+(:func:`error_body`; the field errors of a 422 are in ``details.fields`` as
+``[{"location": [...], "message": ...}]``, the shape the website uses).
+
 Nothing here imports the ``safety_ai`` package (DECISIONS.md D-024).
 """
 
 from __future__ import annotations
 
 import asyncio
+import bisect
 import contextlib
 import hashlib
 import json
@@ -35,13 +40,13 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Final, Protocol
 
 import yaml
 from pydantic import ValidationError
 
 from tools.mock_models import (
-    DEFAULT_SEVERITY,
     CameraConfigModel,
     ContractError,
     DetectionsMessageModel,
@@ -52,9 +57,11 @@ from tools.mock_models import (
     MockConfigFileModel,
     StatsModel,
     ValidatedEvent,
+    ZoneModel,
     analyse_ws_message,
     camera_config_to_contract,
     format_validation_errors,
+    resolve_severity,
 )
 
 __all__ = [
@@ -66,6 +73,7 @@ __all__ = [
     "ENDPOINT_HEARTBEAT",
     "ENDPOINT_STATS",
     "ENDPOINT_WS",
+    "ERROR_CODES",
     "FAULT_PATHS",
     "MJPEG_BOUNDARY",
     "ConfigChange",
@@ -85,6 +93,8 @@ __all__ = [
     "SystemMockClock",
     "WsConnection",
     "WsHub",
+    "error_body",
+    "field_errors",
     "format_millis",
     "format_seconds",
     "load_config_file",
@@ -117,6 +127,58 @@ _MAX_FAULT_RULES: Final[int] = 64
 _MAX_RATE_KEYS: Final[int] = 1024
 _MAX_ERROR_TEXT: Final[int] = 1000
 _SAFE_NAME: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9_.-]")
+
+ERROR_CODES: Final[Mapping[int, str]] = MappingProxyType(
+    {
+        400: "bad_request",
+        401: "unauthorized",
+        403: "forbidden",
+        404: "not_found",
+        405: "method_not_allowed",
+        409: "conflict",
+        413: "payload_too_large",
+        415: "unsupported_media_type",
+        422: "validation_error",
+        429: "too_many_requests",
+        500: "internal_error",
+        502: "bad_gateway",
+        503: "service_unavailable",
+        504: "gateway_timeout",
+    }
+)
+"""``error.code`` per HTTP status (the website's codes for 401-422; ``http_error`` otherwise)."""
+
+
+def error_body(
+    status: int, message: str, details: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """The contract's error body ``{"error": {"code", "message", "details"}}`` for ``status``."""
+    return {
+        "error": {
+            "code": ERROR_CODES.get(status, "http_error"),
+            "message": message,
+            "details": dict(details) if details is not None else {},
+        }
+    }
+
+
+def _location(text: str) -> list[str | int]:
+    if text.startswith("<") and text.endswith(">"):
+        return [text]
+    return [int(part) if part.isdigit() else part for part in text.split(".")]
+
+
+def field_errors(lines: Sequence[str]) -> list[dict[str, Any]]:
+    """``["details.boxes.0.bbox: too big"]`` -> ``[{"location": ["details", "boxes", 0, "bbox"],
+    "message": "too big"}]`` (lines without a ``location: `` prefix get an empty location)."""
+    fields: list[dict[str, Any]] = []
+    for line in lines:
+        location, separator, message = line.partition(": ")
+        if not separator or not location or " " in location:
+            fields.append({"location": [], "message": line})
+        else:
+            fields.append({"location": _location(location), "message": message})
+    return fields
 
 
 # --------------------------------------------------------------------------------------------
@@ -325,8 +387,8 @@ class ConfigStore:
             self._entries[camera_id] = _CameraEntry(config, version, now)
         return ConfigChange(camera_id, version)
 
-    def severity_override(self, camera_id: str, zone_id: str | None) -> str | None:
-        """The ``severity_override`` of the zone in the current config, if any."""
+    def zone(self, camera_id: str, zone_id: str | None) -> ZoneModel | None:
+        """The zone ``zone_id`` of the camera's current config, or None (unknown or null)."""
         if zone_id is None:
             return None
         with self._lock:
@@ -335,8 +397,13 @@ class ConfigStore:
             return None
         for zone in entry.config.zones:
             if zone.id == zone_id:
-                return zone.rules.severity_override
+                return zone
         return None
+
+    def severity_override(self, camera_id: str, zone_id: str | None) -> str | None:
+        """The ``severity_override`` of the zone in the current config, if any."""
+        zone = self.zone(camera_id, zone_id)
+        return zone.rules.severity_override if zone is not None else None
 
 
 # --------------------------------------------------------------------------------------------
@@ -442,19 +509,40 @@ class FaultInjector:
 class SlidingRateLimiter:
     """Detects more than ``limit`` messages within any ``window_s`` window, per key.
 
-    Times are the messages' own timestamps (seconds). A window holds ``limit + 1`` messages when
-    their time span is below ``window_s - tolerance_s``; the tolerance absorbs millisecond
-    rounding of ``ts`` and capture-to-send jitter of a client throttling at exactly the limit.
+    Times are the messages' own timestamps (seconds), so arrival order does not matter: the
+    recent timestamps of a key are kept sorted, and a message exceeds the limit when it is one
+    of ``limit + 1`` consecutive timestamps whose span is below ``window_s - tolerance_s``. The
+    tolerance absorbs millisecond rounding of ``ts`` and capture-to-send jitter of a client
+    throttling at exactly the limit. Per key at most ``history`` timestamps (the latest ones by
+    time) are kept, and at most 1024 keys.
     """
 
-    def __init__(self, limit: int, window_s: float = 1.0, tolerance_s: float = 0.05) -> None:
-        """Create a limiter allowing ``limit`` messages per ``window_s`` seconds."""
+    def __init__(
+        self,
+        limit: int,
+        window_s: float = 1.0,
+        tolerance_s: float = 0.05,
+        history: int | None = None,
+    ) -> None:
+        """Create a limiter allowing ``limit`` messages per ``window_s`` seconds.
+
+        Args:
+            limit: Messages allowed per window (>= 1).
+            window_s: Window length in seconds (> ``tolerance_s``).
+            tolerance_s: Span slack, see the class docstring.
+            history: Timestamps kept per key (default ``4 * (limit + 1)``, at least
+                ``limit + 1``); late messages older than all of them cannot be compared.
+        """
         if limit < 1 or window_s <= tolerance_s:
             raise ValueError("limit must be >= 1 and window_s > tolerance_s")
+        kept = 4 * (limit + 1) if history is None else history
+        if kept < limit + 1:
+            raise ValueError("history must keep at least limit + 1 timestamps")
         self.limit = limit
         self.window_s = window_s
         self.tolerance_s = tolerance_s
-        self._times: dict[str, deque[float]] = {}
+        self.history = kept
+        self._times: dict[str, list[float]] = {}
 
     def observe(self, key: str, t: float) -> bool:
         """Record a message at time ``t``; True when it exceeds the limit. Not thread-safe."""
@@ -462,12 +550,21 @@ class SlidingRateLimiter:
         if times is None:
             if len(self._times) >= _MAX_RATE_KEYS:
                 self._times.pop(next(iter(self._times)))
-            times = deque(maxlen=self.limit + 1)
+            times = []
             self._times[key] = times
-        times.append(t)
-        if len(times) <= self.limit:
-            return False
-        return max(times) - min(times) < self.window_s - self.tolerance_s
+        position = bisect.bisect_right(times, t)
+        times.insert(position, t)
+        exceeded = self._exceeds(times, position)
+        if len(times) > self.history:
+            del times[: len(times) - self.history]
+        return exceeded
+
+    def _exceeds(self, times: Sequence[float], position: int) -> bool:
+        """True when ``times[position]`` belongs to ``limit + 1`` timestamps within the window."""
+        span_limit = self.window_s - self.tolerance_s
+        first = max(0, position - self.limit)
+        last = min(position, len(times) - self.limit - 1)
+        return any(times[s + self.limit] - times[s] < span_limit for s in range(first, last + 1))
 
     def clear(self) -> None:
         """Forget every key."""
@@ -920,13 +1017,23 @@ class MockState:
         return record
 
     def reject(
-        self, endpoint: str, error: ContractError, excerpt: str, *, status: int = 422
+        self, endpoint: str, error: ContractError, excerpt: str, *, status: int | None = None
     ) -> HttpOutcome:
-        """Record ``error`` as a violation of ``endpoint`` and build the error response."""
+        """Record ``error`` as a violation of ``endpoint`` and build the error response.
+
+        The status is ``status`` when given, else ``error.status`` (422, 413 or 415). The body is
+        the contract's error object: a 401 carries the problem as its message (no details); every
+        other status carries ``error.reason`` and the problems as ``details.fields``.
+        """
+        code = status if status is not None else error.status
         with self._lock:
             self._add_violation("http", endpoint, error.reason, error.errors, excerpt)
-            self._http.setdefault(endpoint, Counter())[str(status)] += 1
-        return HttpOutcome(status, {"detail": error.reason, "errors": list(error.errors)})
+            self._http.setdefault(endpoint, Counter())[str(code)] += 1
+        if code == 401:
+            return HttpOutcome(code, error_body(code, "; ".join(error.errors)))
+        return HttpOutcome(
+            code, error_body(code, error.reason, {"fields": field_errors(error.errors)})
+        )
 
     def count_ws_rejected(self) -> None:
         """Count a WebSocket connection refused for a bad ``api_key``."""
@@ -943,7 +1050,8 @@ class MockState:
         * a known ``external_id`` -> 200 with the original body (identity fields must match);
         * an accepted event with the same (camera, zone, type, track) whose ``started_at`` is
           less than 60 s before this one's -> 202 ``{"deduplicated": true, "id": <existing>}``;
-        * otherwise -> 201, stored in memory, ``events.jsonl`` and ``snapshots/``.
+        * otherwise -> 201, stored in memory, ``events.jsonl`` and ``snapshots/``, with the
+          severity of :func:`~tools.mock_models.resolve_severity`.
         """
         event = validated.event
         payload = validated.payload
@@ -982,11 +1090,7 @@ class MockState:
                 )
                 self._http.setdefault(ENDPOINT_EVENTS_POST, Counter())["202"] += 1
                 return HttpOutcome(202, {"deduplicated": True, "id": prior.id})
-            severity = (
-                self.config.severity_override(event.camera_id, event.zone_id)
-                or event.severity
-                or DEFAULT_SEVERITY[event.type]
-            )
+            severity = resolve_severity(event, self.config.zone(event.camera_id, event.zone_id))
             event_id = uuid.uuid4().hex
             response = {
                 "id": event_id,
@@ -1067,7 +1171,7 @@ class MockState:
             stored = self._events.get(external_id)
             if stored is None:
                 self._http.setdefault(ENDPOINT_EVENTS_PATCH, Counter())["404"] += 1
-                return HttpOutcome(404, {"detail": f"unknown external_id {external_id!r}"})
+                return HttpOutcome(404, error_body(404, f"unknown external_id {external_id!r}"))
             if patch.ended_at < stored.started_at:
                 return self.reject(
                     ENDPOINT_EVENTS_PATCH,
@@ -1224,7 +1328,7 @@ class MockState:
         config = self.config.get(camera_id)
         if config is None:
             self.count_http(ENDPOINT_CONFIG_GET, 404)
-            return HttpOutcome(404, {"detail": f"unknown camera {camera_id!r}"})
+            return HttpOutcome(404, error_body(404, f"unknown camera {camera_id!r}"))
         self.count_http(ENDPOINT_CONFIG_GET, 200)
         return HttpOutcome(200, config)
 

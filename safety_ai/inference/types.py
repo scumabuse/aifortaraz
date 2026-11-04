@@ -11,7 +11,7 @@ model input) and boxes are ``(x, y, w, h)``: top-left corner plus width and heig
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
@@ -57,6 +57,7 @@ __all__ = [
     "bbox_from_xyxy",
     "bbox_to_xyxy",
     "clamp01",
+    "supported_ppe",
 ]
 
 BBox = tuple[float, float, float, float]
@@ -130,6 +131,17 @@ KP_RIGHT_ANKLE: Final[int] = 16
 NUM_KEYPOINTS: Final[int] = 17
 
 _EPS: Final[float] = 1e-6
+
+
+def supported_ppe(classes: Iterable[str]) -> tuple[str, ...]:
+    """Return the PPE codes among a detector's mapped classes, in contract order.
+
+    This is ``heartbeat.extra.supported_ppe`` (contract 4.2): the items the loaded model can
+    detect at all, derived from :attr:`ModelInfo.classes` (the labels after mapping to the
+    unified taxonomy). Bare parts, persons and vehicles are not PPE codes and are left out.
+    """
+    present = set(classes)
+    return tuple(code for code in PPE_CODES if code in present)
 
 
 def clamp01(value: float) -> float:

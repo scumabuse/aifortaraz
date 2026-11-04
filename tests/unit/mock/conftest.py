@@ -252,6 +252,38 @@ class Payloads:
 PostEvent = Callable[..., Any]
 
 
+def contract_error(response: Any) -> dict[str, Any]:
+    """The ``error`` object of an error response; asserts the contract's exact envelope."""
+    body = response.json()
+    assert set(body) == {"error"}, body
+    error: dict[str, Any] = body["error"]
+    assert set(error) == {"code", "message", "details"}, error
+    assert isinstance(error["code"], str) and isinstance(error["message"], str), error
+    assert isinstance(error["details"], dict), error
+    return error
+
+
+def contract_error_lines(response: Any) -> list[str]:
+    """``details.fields`` of an error response as readable ``location: message`` lines."""
+    lines = []
+    for field in contract_error(response)["details"].get("fields", []):
+        location = ".".join(str(part) for part in field["location"])
+        lines.append(f"{location}: {field['message']}" if location else field["message"])
+    return lines
+
+
+@pytest.fixture
+def error_of() -> Callable[[Any], dict[str, Any]]:
+    """``error_of(response)`` -> the contract ``error`` object (envelope checked)."""
+    return contract_error
+
+
+@pytest.fixture
+def error_lines() -> Callable[[Any], list[str]]:
+    """``error_lines(response)`` -> the field errors as ``location: message`` lines."""
+    return contract_error_lines
+
+
 @pytest.fixture
 def payloads() -> Payloads:
     """Factories of valid contract messages."""

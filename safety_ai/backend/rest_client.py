@@ -8,10 +8,17 @@ backend base URL, a per-request timeout, the ``X-API-Key`` header and the
   problems: they return a :class:`PostOutcome` / :class:`PatchOutcome` whose ``kind`` drives the
   spool sender (``ok`` 2xx, ``conflict`` 409 = already accepted, ``retry`` connection error /
   timeout / 5xx / 429 with ``retry_after_s``, ``rejected_422``, ``not_found`` 404 on PATCH,
-  ``client_error`` other 4xx).
+  ``unauthorized`` 401/403, ``client_error`` other 4xx).
 - :meth:`RestClient.post_heartbeat` / :meth:`RestClient.post_stats` return a bool and never raise;
   failures are logged at WARNING (422 at ERROR) at most once per ``warn_interval_s`` per endpoint.
 - :meth:`RestClient.get_config` / :meth:`RestClient.get_all_configs` raise :class:`BackendError`.
+
+HTTP 401/403 means a wrong or revoked API key, not a client bug (integration contract, spec 6.2.1):
+the outcome is ``unauthorized`` (never a rejection), heartbeat and stats failures log the readable
+:func:`auth_error_message` at ERROR at most once per ``warn_interval_s`` (shared by both
+endpoints), and :attr:`RestClient.unauthorized`, :attr:`RestClient.last_auth_error_at` and
+:attr:`RestClient.auth_error_count` expose the state (for ``/health``). The key itself is never
+logged (DECISIONS.md D-033).
 
 The optional ``on_request(endpoint, seconds, outcome)`` hook receives every request's duration
 and outcome (for the ``backend_request_seconds`` and ``backend_failures_total`` metrics).
@@ -25,9 +32,10 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Final, Literal, TypeVar
 from urllib.parse import quote
 
@@ -47,13 +55,16 @@ from safety_ai.backend.schemas import (
 from safety_ai.clock import Clock, SystemClock
 
 __all__ = [
+    "AUTH_ERROR_STATUSES",
     "CONFIG_PATH",
     "ENDPOINT_CONFIG",
     "ENDPOINT_CONFIG_ALL",
+    "ENDPOINT_DESCRIPTIONS",
     "ENDPOINT_HEARTBEAT",
     "ENDPOINT_PATCH_EVENT",
     "ENDPOINT_POST_EVENT",
     "ENDPOINT_STATS",
+    "ENDPOINT_WS",
     "EVENTS_PATH",
     "HEARTBEAT_PATH",
     "STATS_PATH",
@@ -65,6 +76,7 @@ __all__ = [
     "RequestHook",
     "RequestOutcome",
     "RestClient",
+    "auth_error_message",
     "classify_status",
     "parse_retry_after",
 ]
@@ -82,9 +94,28 @@ ENDPOINT_HEARTBEAT: Final[str] = "heartbeat"
 ENDPOINT_STATS: Final[str] = "stats"
 ENDPOINT_CONFIG: Final[str] = "config"
 ENDPOINT_CONFIG_ALL: Final[str] = "config_all"
+ENDPOINT_WS: Final[str] = "ws_ingest"
 
-OutcomeKind = Literal["ok", "retry", "rejected_422", "client_error", "not_found", "conflict"]
-"""Classification of one request (contract 4.7)."""
+ENDPOINT_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        ENDPOINT_POST_EVENT: f"POST {EVENTS_PATH}",
+        ENDPOINT_PATCH_EVENT: f"PATCH {EVENTS_PATH}/{{external_id}}",
+        ENDPOINT_HEARTBEAT: f"POST {HEARTBEAT_PATH}",
+        ENDPOINT_STATS: f"POST {STATS_PATH}",
+        ENDPOINT_CONFIG: f"GET {CONFIG_PATH}/{{camera_id}}",
+        ENDPOINT_CONFIG_ALL: f"GET {CONFIG_PATH}",
+        ENDPOINT_WS: "WS /ws/ingest",
+    }
+)
+"""Readable ``METHOD path`` of every endpoint name (used in operator-facing log lines)."""
+
+AUTH_ERROR_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
+"""Statuses that mean the backend refused the API key (wrong, missing or revoked)."""
+
+OutcomeKind = Literal[
+    "ok", "retry", "rejected_422", "client_error", "not_found", "conflict", "unauthorized"
+]
+"""Classification of one request (contract 4.8; ``unauthorized`` = 401/403, spec 6.2.1)."""
 
 BackendErrorReason = Literal["connection", "timeout", "status", "invalid_response"]
 """Why a config request failed: unreachable backend, timeout, non-2xx status or a bad body."""
@@ -176,6 +207,11 @@ class BackendError(Exception):
         """True when no response was received (connection error or timeout)."""
         return self.reason in ("connection", "timeout")
 
+    @property
+    def unauthorized(self) -> bool:
+        """True when the backend refused the API key (HTTP 401 or 403)."""
+        return self.reason == "status" and self.status_code in AUTH_ERROR_STATUSES
+
     def __reduce__(
         self,
     ) -> tuple[Callable[..., BackendError], tuple[str, str, BackendErrorReason, int | None]]:
@@ -190,7 +226,7 @@ def _rebuild_backend_error(
 
 
 def classify_status(status_code: int, *, method: str) -> OutcomeKind:
-    """Classify an HTTP status code for the spool sender (contract 4.1 and 4.7).
+    """Classify an HTTP status code for the spool sender (contract 4.1 and 4.8).
 
     Args:
         status_code: The response status.
@@ -198,7 +234,8 @@ def classify_status(status_code: int, *, method: str) -> OutcomeKind:
 
     Returns:
         ``ok`` for 2xx, ``conflict`` for 409, ``rejected_422`` for 422, ``retry`` for 429 and
-        5xx, ``not_found`` for a PATCH 404, ``client_error`` for any other 4xx and ``retry`` for
+        5xx, ``unauthorized`` for 401 and 403 (a wrong or revoked API key, not a client bug),
+        ``not_found`` for a PATCH 404, ``client_error`` for any other 4xx and ``retry`` for
         unexpected statuses (1xx/3xx: never drop an event because of a misbehaving proxy).
     """
     if 200 <= status_code < 300:
@@ -209,11 +246,32 @@ def classify_status(status_code: int, *, method: str) -> OutcomeKind:
         return "rejected_422"
     if status_code == 429:
         return "retry"
+    if status_code in AUTH_ERROR_STATUSES:
+        return "unauthorized"
     if status_code == 404 and method.upper() == "PATCH":
         return "not_found"
     if 400 <= status_code < 500:
         return "client_error"
     return "retry"
+
+
+def auth_error_message(status_code: int | None, endpoint: str) -> str:
+    """The operator-facing line for a refused API key (the key itself is never included).
+
+    Args:
+        status_code: The HTTP status (401 or 403); None reads as 401.
+        endpoint: An endpoint name (``ENDPOINT_*``) or any readable request description.
+
+    Returns:
+        ``backend rejected the API key (HTTP 401) for POST /api/v1/ingest/events — check
+        SAFETY_AI_API_KEY / the website's AI key``.
+    """
+    where = ENDPOINT_DESCRIPTIONS.get(endpoint, endpoint)
+    status = status_code if status_code is not None else 401
+    return (
+        f"backend rejected the API key (HTTP {status}) for {where} — check SAFETY_AI_API_KEY / "
+        "the website's AI key"
+    )
 
 
 def parse_retry_after(value: str | None, now: datetime) -> float | None:
@@ -272,7 +330,8 @@ class RestClient:
         transport: Optional httpx transport (``httpx.MockTransport`` in tests).
         on_request: Optional ``(endpoint, seconds, outcome)`` hook called after every request.
         clock: Clock for ``Retry-After`` dates and log rate limiting (system clock when None).
-        warn_interval_s: Minimum seconds between two failure logs of the same ephemeral endpoint.
+        warn_interval_s: Minimum seconds between two failure logs of the same ephemeral endpoint
+            (and between two refused-key ERROR lines of heartbeat and stats together).
         max_body_chars: Response bodies kept in outcomes are truncated to this many characters.
 
     Raises:
@@ -316,6 +375,11 @@ class RestClient:
         self._lock = threading.Lock()
         self._warn_state: dict[str, _WarnState] = {}
         self._reachable: bool | None = None
+        self._auth_log = _WarnState()
+        self._unauthorized = False
+        self._auth_errors = 0
+        self._last_auth_error_at: datetime | None = None
+        self._last_auth_status: int | None = None
 
     # ------------------------------------------------------------------ properties
 
@@ -334,6 +398,30 @@ class RestClient:
         """Whether the last request got an HTTP response (None before the first request)."""
         with self._lock:
             return self._reachable
+
+    @property
+    def unauthorized(self) -> bool:
+        """True while the backend refuses the API key: a 401/403 came after the last 2xx."""
+        with self._lock:
+            return self._unauthorized
+
+    @property
+    def last_auth_error_at(self) -> datetime | None:
+        """Aware UTC time of the latest 401/403 response (None when there was none)."""
+        with self._lock:
+            return self._last_auth_error_at
+
+    @property
+    def last_auth_error_status(self) -> int | None:
+        """HTTP status (401 or 403) of the latest refused request (None when there was none)."""
+        with self._lock:
+            return self._last_auth_status
+
+    @property
+    def auth_error_count(self) -> int:
+        """Number of 401/403 responses since the client was created."""
+        with self._lock:
+            return self._auth_errors
 
     # ------------------------------------------------------------------ events (4.1)
 
@@ -457,9 +545,30 @@ class RestClient:
             return self._failed(exc, started, timed_out=True)
         except (httpx.HTTPError, OSError) as exc:
             return self._failed(exc, started, timed_out=False)
+        self._track_auth(response.status_code)
+        return _Exchange(response, "", False, time.perf_counter() - started)
+
+    def _track_auth(self, status_code: int) -> None:
+        """Remember whether the backend accepts the API key (401/403: no; 2xx: yes).
+
+        Other statuses (5xx from a proxy, 429, ...) say nothing about the key and keep the state.
+        """
+        refused = status_code in AUTH_ERROR_STATUSES
+        accepted = 200 <= status_code < 300
         with self._lock:
             self._reachable = True
-        return _Exchange(response, "", False, time.perf_counter() - started)
+            recovered = accepted and self._unauthorized
+            if refused:
+                self._unauthorized = True
+                self._auth_errors += 1
+                self._last_auth_error_at = self._clock.now_utc()
+                self._last_auth_status = status_code
+            elif accepted:
+                self._unauthorized = False
+            if recovered:
+                self._auth_log = _WarnState()
+        if recovered:
+            _log.info("backend accepts the API key again (HTTP %d)", status_code)
 
     def _failed(self, exc: Exception, started: float, *, timed_out: bool) -> _Exchange:
         with self._lock:
@@ -521,6 +630,9 @@ class RestClient:
         self._report(endpoint, exchange.seconds, kind)
         if kind == "ok":
             return True
+        if kind == "unauthorized":
+            self._log_auth_failure(endpoint, response.status_code)
+            return False
         outcome = RequestOutcome(
             kind=kind,
             status_code=response.status_code,
@@ -528,6 +640,28 @@ class RestClient:
         )
         self._log_ephemeral_failure(endpoint, outcome)
         return False
+
+    def _log_auth_failure(self, endpoint: str, status_code: int) -> None:
+        """Log the readable refused-key line at ERROR, at most once per ``warn_interval_s``.
+
+        Heartbeat and stats share one limit: they fail for the same reason, and heartbeats of
+        every camera arrive every 5 s.
+        """
+        now = self._clock.monotonic()
+        with self._lock:
+            state = self._auth_log
+            if state.last_logged is not None and now - state.last_logged < self._warn_interval_s:
+                state.suppressed += 1
+                return
+            suppressed = state.suppressed
+            state.suppressed = 0
+            state.last_logged = now
+        note = f" ({suppressed} similar failures suppressed)" if suppressed else ""
+        _log.error(
+            "%s; heartbeats and stats are dropped until the key is accepted%s",
+            auth_error_message(status_code, endpoint),
+            note,
+        )
 
     def _log_ephemeral_failure(self, endpoint: str, outcome: RequestOutcome) -> None:
         """Log at most one failure per endpoint per ``warn_interval_s`` (no log storms)."""

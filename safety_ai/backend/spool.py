@@ -15,6 +15,10 @@ its POST and one stuck camera never blocks another. Outcomes (see :mod:`.rest_cl
   id) prevents duplicates;
 - ``retry`` (connection error, timeout, 5xx, 429): exponential backoff 0.5 s -> 30 s with full
   jitter, forever; a 429 waits ``Retry-After`` instead;
+- ``unauthorized`` (401/403: a wrong or revoked API key, never a client bug): the item stays
+  pending and is retried every ``auth_retry_s`` (10 s, fixed) forever; one readable ERROR line
+  (:func:`~.rest_client.auth_error_message`) is logged at most once per ``auth_log_interval_s``
+  (60 s) for all cameras together; :attr:`SpoolSender.unauthorized` is True meanwhile;
 - ``rejected_422``: logged at ERROR with the response body, moved to ``logs/rejected/``
   immediately and counted in :attr:`SpoolSender.rejected_422_count`;
 - ``client_error`` (other 4xx): three attempts, then moved to ``logs/rejected/``;
@@ -25,6 +29,14 @@ Rejected items are written to ``<rejected_dir>/<utc>_<external_id>_<kind>.json``
 code, response body, reason) with the snapshot as ``.jpg`` next to it. ``<utc>`` is
 ``YYYYMMDDTHHMMSSZ`` and characters that are not URL-unreserved are percent-encoded so the names
 are valid on Windows.
+
+Crash recovery: while an event is ACTIVE its worker records, every few seconds, when the event
+was last known alive (:meth:`EventSpool.mark_alive`, table ``event_alive``). A worker that is
+killed cannot PATCH its events, and the website would keep them open forever, so before a
+camera's worker starts the supervisor calls :meth:`EventSpool.close_orphaned_events`: every
+event of the camera that was POSTed (or still waits to be POSTed) and never got a PATCH gets one
+with ``ended_at`` = the last time it was known alive (the POST's spool time when it never was).
+The PATCH item makes the event non-orphaned, so a second recovery spools nothing.
 """
 
 from __future__ import annotations
@@ -38,7 +50,7 @@ import sqlite3
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -46,7 +58,14 @@ from typing import Any, Final, Literal, Protocol
 from urllib.parse import quote
 
 from safety_ai.backend.backoff import Backoff
-from safety_ai.backend.rest_client import PatchOutcome, PostOutcome, RequestOutcome
+from safety_ai.backend.rest_client import (
+    ENDPOINT_PATCH_EVENT,
+    ENDPOINT_POST_EVENT,
+    PatchOutcome,
+    PostOutcome,
+    RequestOutcome,
+    auth_error_message,
+)
 from safety_ai.backend.schemas import EventEndPatch, EventPayload
 from safety_ai.clock import Clock, SystemClock, format_utc_millis, parse_utc, to_utc
 
@@ -56,6 +75,7 @@ __all__ = [
     "EventSpool",
     "ItemKind",
     "ItemStatus",
+    "OrphanedEvent",
     "SpoolClosedError",
     "SpoolItem",
     "SpoolSender",
@@ -92,6 +112,11 @@ CREATE TABLE IF NOT EXISTS items (
 );
 CREATE INDEX IF NOT EXISTS items_pending ON items (status, camera_id, id);
 CREATE INDEX IF NOT EXISTS items_external_id ON items (external_id, kind);
+CREATE TABLE IF NOT EXISTS event_alive (
+    external_id TEXT PRIMARY KEY,
+    camera_id TEXT NOT NULL,
+    last_seen_utc TEXT NOT NULL
+);
 """
 _COLUMNS: Final[str] = (
     "id, camera_id, kind, external_id, payload_json, snapshot, created_utc, attempts, "
@@ -103,6 +128,29 @@ _MIN_RETRY_DELAY_S: Final[float] = 0.05
 
 class SpoolClosedError(RuntimeError):
     """The spool was used after :meth:`EventSpool.close`."""
+
+
+@dataclass(frozen=True, slots=True)
+class OrphanedEvent:
+    """An event left open by a killed worker and closed by :meth:`EventSpool.close_orphaned_events`.
+
+    Attributes:
+        camera_id: The event's camera.
+        external_id: The event's external id.
+        started_at: The event's ``started_at``.
+        ended_at: The ``ended_at`` of the spooled PATCH: the last time the event was known alive
+            (never before ``started_at``).
+        last_seen_known: False when no alive time was recorded (``ended_at`` is then the time
+            the POST was spooled).
+        patch_item_id: The id of the spooled PATCH item.
+    """
+
+    camera_id: str
+    external_id: str
+    started_at: datetime
+    ended_at: datetime
+    last_seen_known: bool
+    patch_item_id: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +350,50 @@ def _item_from_row(row: tuple[Any, ...]) -> SpoolItem:
     )
 
 
+def _insert_row(
+    conn: sqlite3.Connection,
+    *,
+    camera_id: str,
+    kind: ItemKind,
+    external_id: str,
+    payload_json: str,
+    snapshot: bytes | None,
+    created_utc: str,
+) -> int:
+    """Insert one item inside the caller's transaction; returns its id."""
+    cursor = conn.execute(
+        "INSERT INTO items (camera_id, kind, external_id, payload_json, snapshot, "
+        "created_utc) VALUES (?, ?, ?, ?, ?, ?)",
+        (camera_id, kind, external_id, payload_json, snapshot, created_utc),
+    )
+    item_id = cursor.lastrowid
+    if item_id is None:
+        raise AssertionError("SQLite always reports the row id of a successful INSERT")
+    return int(item_id)
+
+
+def _orphan_end(
+    external_id: str, payload_json: str, created_utc: str, last_seen_utc: object
+) -> tuple[datetime, datetime, bool] | None:
+    """``(started_at, ended_at, last_seen_known)`` of an orphan; None when it needs no PATCH.
+
+    A stored payload that does not parse, or one that already carries ``ended_at``, is skipped.
+    """
+    try:
+        payload = EventPayload.model_validate_json(payload_json)
+    except ValueError:
+        _log.warning("spooled POST payload of %s is not a valid event", external_id)
+        return None
+    if payload.ended_at is not None:
+        return None
+    last_seen = (
+        parse_utc(last_seen_utc) if isinstance(last_seen_utc, str) and last_seen_utc else None
+    )
+    candidate = last_seen if last_seen is not None else parse_utc(created_utc)
+    ended_at = max(payload.started_at, candidate.replace(microsecond=0))
+    return payload.started_at, ended_at, last_seen is not None
+
+
 class EventSpool:
     """Durable FIFO of event requests in SQLite (WAL mode, busy timeout).
 
@@ -403,15 +495,15 @@ class EventSpool:
     ) -> int:
         created = format_utc_millis(self._clock.now_utc())
         with self._transaction() as conn:
-            cursor = conn.execute(
-                "INSERT INTO items (camera_id, kind, external_id, payload_json, snapshot, "
-                "created_utc) VALUES (?, ?, ?, ?, ?, ?)",
-                (camera_id, kind, external_id, payload_json, snapshot, created),
+            return _insert_row(
+                conn,
+                camera_id=camera_id,
+                kind=kind,
+                external_id=external_id,
+                payload_json=payload_json,
+                snapshot=snapshot,
+                created_utc=created,
             )
-            item_id = cursor.lastrowid
-        if item_id is None:
-            raise AssertionError("SQLite always reports the row id of a successful INSERT")
-        return int(item_id)
 
     # ------------------------------------------------------------------ producers
 
@@ -434,11 +526,115 @@ class EventSpool:
     def enqueue_patch(self, camera_id: str, external_id: str, ended_at: datetime) -> int:
         """Spool the end of an event (``PATCH`` with ``ended_at``); returns the item id.
 
+        The event's alive record (:meth:`mark_alive`) is removed in the same transaction.
+
         Raises:
             ValueError: When ``ended_at`` is not timezone-aware.
         """
         body = EventEndPatch(ended_at=ended_at).model_dump_json()
-        return self._insert(camera_id, "patch", external_id, body, None)
+        created = format_utc_millis(self._clock.now_utc())
+        with self._transaction() as conn:
+            item_id = _insert_row(
+                conn,
+                camera_id=camera_id,
+                kind="patch",
+                external_id=external_id,
+                payload_json=body,
+                snapshot=None,
+                created_utc=created,
+            )
+            conn.execute("DELETE FROM event_alive WHERE external_id = ?", (external_id,))
+        return item_id
+
+    def mark_alive(self, camera_id: str, external_ids: Sequence[str], seen_at: datetime) -> None:
+        """Record that the ACTIVE events ``external_ids`` were alive at ``seen_at``.
+
+        Workers call this every few seconds; :meth:`close_orphaned_events` uses the latest time
+        as ``ended_at`` of an event whose worker was killed. A later call never moves a time
+        backwards; ids without a POST are ignored by the recovery.
+
+        Raises:
+            ValueError: When ``seen_at`` is not timezone-aware.
+        """
+        if not external_ids:
+            return
+        seen = format_utc_millis(to_utc(seen_at))
+        rows = [(external_id, camera_id, seen) for external_id in dict.fromkeys(external_ids)]
+        with self._transaction() as conn:
+            conn.executemany(
+                "INSERT INTO event_alive (external_id, camera_id, last_seen_utc) VALUES (?, ?, ?) "
+                "ON CONFLICT(external_id) DO UPDATE SET last_seen_utc = excluded.last_seen_utc "
+                "WHERE excluded.last_seen_utc > event_alive.last_seen_utc",
+                rows,
+            )
+
+    def close_orphaned_events(self, camera_ids: Sequence[str] | None = None) -> list[OrphanedEvent]:
+        """Spool a PATCH for every event that was POSTed but never ended (crash recovery).
+
+        An orphan is a POST (pending or delivered, not rejected) without ``ended_at`` for whose
+        external id no PATCH was ever spooled. Each gets a PATCH with ``ended_at`` = its last
+        alive time (:meth:`mark_alive`), else the time its POST was spooled, and never earlier
+        than ``started_at``. Everything happens in one transaction, so concurrent callers never
+        close an event twice and a second call returns an empty list. Call it only for cameras
+        whose worker is not running (a running worker's ACTIVE events look the same).
+
+        Args:
+            camera_ids: Restrict the recovery to these cameras (None: every camera).
+
+        Returns:
+            The closed events, in the order they were spooled.
+        """
+        if camera_ids is not None and not camera_ids:
+            return []
+        sql = (
+            "SELECT p.camera_id, p.external_id, p.payload_json, p.created_utc, a.last_seen_utc "
+            "FROM items AS p LEFT JOIN event_alive AS a ON a.external_id = p.external_id "
+            "WHERE p.kind = 'post' AND p.status != 'rejected' AND NOT EXISTS ("
+            "SELECT 1 FROM items AS q WHERE q.external_id = p.external_id AND q.kind = 'patch')"
+        )
+        params: tuple[object, ...] = ()
+        if camera_ids is not None:
+            cameras = tuple(dict.fromkeys(camera_ids))
+            placeholders = ", ".join("?" for _ in cameras)
+            sql += f" AND p.camera_id IN ({placeholders})"
+            params = cameras
+        sql += " ORDER BY p.id"
+        created = format_utc_millis(self._clock.now_utc())
+        closed: list[OrphanedEvent] = []
+        with self._transaction() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            seen: set[str] = set()
+            for camera_id, external_id, payload_json, created_utc, last_seen_utc in rows:
+                key = str(external_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                end = _orphan_end(key, str(payload_json), str(created_utc), last_seen_utc)
+                if end is None:
+                    continue
+                started_at, ended_at, known = end
+                body = EventEndPatch(ended_at=ended_at).model_dump_json()
+                item_id = _insert_row(
+                    conn,
+                    camera_id=str(camera_id),
+                    kind="patch",
+                    external_id=key,
+                    payload_json=body,
+                    snapshot=None,
+                    created_utc=created,
+                )
+                conn.execute("DELETE FROM event_alive WHERE external_id = ?", (key,))
+                closed.append(
+                    OrphanedEvent(
+                        camera_id=str(camera_id),
+                        external_id=key,
+                        started_at=started_at,
+                        ended_at=ended_at,
+                        last_seen_known=known,
+                        patch_item_id=item_id,
+                    )
+                )
+        return closed
 
     # ------------------------------------------------------------------ consumer
 
@@ -652,7 +848,9 @@ class EventSpool:
                 "AND p.status = 'pending'))",
                 (cutoff,),
             )
-            return int(cursor.rowcount)
+            purged = int(cursor.rowcount)
+            conn.execute("DELETE FROM event_alive WHERE last_seen_utc < ?", (cutoff,))
+            return purged
 
     def close(self) -> None:
         """Close the database connection; idempotent."""
@@ -727,6 +925,8 @@ class SpoolSender:
         retention_s: Delivered/rejected items older than this are purged by the thread.
         purge_interval_s: How often the thread purges.
         warn_interval_s: At most one retry WARNING per camera per this many seconds.
+        auth_retry_s: Fixed retry interval of an item the backend answered with 401/403.
+        auth_log_interval_s: At most one refused-key ERROR line per this many seconds.
     """
 
     def __init__(
@@ -748,6 +948,8 @@ class SpoolSender:
         retention_s: float = 7 * 86400.0,
         purge_interval_s: float = 3600.0,
         warn_interval_s: float = 60.0,
+        auth_retry_s: float = 10.0,
+        auth_log_interval_s: float = 60.0,
     ) -> None:
         """Validate the settings; the thread starts with :meth:`start`."""
         Backoff(backoff_initial, backoff_max)  # validates the backoff parameters early
@@ -755,6 +957,10 @@ class SpoolSender:
             raise ValueError("max_client_error_attempts must be >= 1")
         if poll_s <= 0:
             raise ValueError("poll_s must be > 0")
+        if auth_retry_s <= 0:
+            raise ValueError("auth_retry_s must be > 0")
+        if auth_log_interval_s < 0:
+            raise ValueError("auth_log_interval_s must be >= 0")
         self._spool = spool
         self._client = client
         self._clock = clock
@@ -771,6 +977,12 @@ class SpoolSender:
         self._retention_s = retention_s
         self._purge_interval_s = purge_interval_s
         self._warn_interval_s = warn_interval_s
+        self._auth_retry_s = auth_retry_s
+        self._auth_log_interval_s = auth_log_interval_s
+        self._auth_last_log: float | None = None
+        self._auth_suppressed = 0
+        self._auth_waiting: set[str] = set()
+        self._unauthorized = 0
         self._lanes: dict[str, _Lane] = {}
         self._step_lock = threading.Lock()
         self._wake = threading.Event()
@@ -805,6 +1017,16 @@ class SpoolSender:
     def retry_count(self) -> int:
         """Failed attempts that were scheduled for a retry."""
         return self._retries
+
+    @property
+    def unauthorized_count(self) -> int:
+        """Attempts the backend refused with 401/403 (wrong or revoked API key; all retried)."""
+        return self._unauthorized
+
+    @property
+    def unauthorized(self) -> bool:
+        """True while at least one camera's next item waits because the API key was refused."""
+        return bool(self._auth_waiting)
 
     @property
     def running(self) -> bool:
@@ -939,6 +1161,7 @@ class SpoolSender:
         heads = self._spool.pending_heads()
         for camera_id in [cam for cam in self._lanes if cam not in heads]:
             del self._lanes[camera_id]
+            self._auth_waiting.discard(camera_id)
         attempted = 0
         earliest: float | None = None
         for camera_id, item_id in heads.items():
@@ -1048,6 +1271,10 @@ class SpoolSender:
         sent_payload: str | None = None,
         snapshot: bytes | None = None,
     ) -> None:
+        if outcome.kind == "unauthorized":
+            self._wait_for_auth(lane, item, outcome)
+            return
+        self._auth_waiting.discard(lane.camera_id)
         if outcome.accepted:
             self._accept(lane, item, outcome)
             return
@@ -1118,6 +1345,63 @@ class SpoolSender:
             except Exception:
                 _log.warning("on_accepted hook failed for %s", item.external_id, exc_info=True)
 
+    def _wait_for_auth(self, lane: _Lane, item: SpoolItem, outcome: RequestOutcome) -> None:
+        """401/403: keep the item pending and retry it every ``auth_retry_s`` (never reject it).
+
+        A refused key is an operator problem (wrong or revoked key), not a bad event, so the
+        exponential backoff is left alone and the 4xx attempt budget is not touched.
+        """
+        self._unauthorized += 1
+        self._auth_waiting.add(lane.camera_id)
+        delay = self._auth_retry_s
+        now = self._clock.monotonic()
+        lane.due = now + delay
+        if lane.failing_since is None:
+            lane.failing_since = now
+        next_at = self._clock.now_utc().timestamp() + delay
+        attempts = self._spool.record_attempt(item.id, outcome.describe(), next_at)
+        self._retries += 1
+        if (
+            self._auth_last_log is not None
+            and now - self._auth_last_log < self._auth_log_interval_s
+        ):
+            self._auth_suppressed += 1
+            _log.debug(
+                "camera %s: %s %s refused again (HTTP %s); retry in %.0f s",
+                item.camera_id,
+                item.kind.upper(),
+                item.external_id,
+                outcome.status_code,
+                delay,
+                extra=_log_extra(item),
+            )
+            return
+        suppressed = self._auth_suppressed
+        self._auth_last_log = now
+        self._auth_suppressed = 0
+        patching = item.kind == "patch" and not lane.repost
+        endpoint = ENDPOINT_PATCH_EVENT if patching else ENDPOINT_POST_EVENT
+        note = f" ({suppressed} similar refusals since the last report)" if suppressed else ""
+        _log.error(
+            "%s; %s kept in the spool and retried every %g s (%s %s, attempt %d)%s",
+            auth_error_message(outcome.status_code, endpoint),
+            self._pending_text(),
+            delay,
+            item.kind.upper(),
+            item.external_id,
+            attempts,
+            note,
+            extra=_log_extra(item),
+        )
+
+    def _pending_text(self) -> str:
+        """``"3 requests"`` for a log line (``"the requests"`` when the database is busy)."""
+        try:
+            count = self._spool.pending_count()
+        except sqlite3.Error:
+            return "the requests"
+        return f"{count} request" if count == 1 else f"{count} requests"
+
     def _schedule_retry(
         self,
         lane: _Lane,
@@ -1185,6 +1469,7 @@ class SpoolSender:
             snapshot=snapshot,
         )
         self._rejected += 1
+        self._auth_waiting.discard(lane.camera_id)
         lane.restart(None)
         _log.error(
             "camera %s: %s %s rejected: %s; response body: %s; saved to %s",

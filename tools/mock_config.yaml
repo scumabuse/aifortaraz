@@ -3,7 +3,8 @@
 # Every entry has exactly the structure of the contract's GET /api/v1/ingest/config/{camera_id}
 # response (docs/CONTRACT.md 4.4) without "version" and "updated_at": the mock starts every camera
 # at version 1 and bumps it on POST /debug/reload-config and POST /debug/set-config/{camera_id}.
-# Times in schedules must be quoted ("20:00"), otherwise YAML reads them as numbers.
+# Schedules use the contract's days 1..7 (1 = Monday ... 7 = Sunday, ISO weekdays) in the camera's
+# local time. Times in schedules must be quoted ("20:00"), otherwise YAML reads them as numbers.
 #
 # Together the cameras cover every rule kind: required_ppe (all nine PPE codes, several
 # combinations including vest and harness), entry_forbidden, max_persons, min_vehicle_distance_m,

@@ -7,6 +7,7 @@ variants of every message type are rejected.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -340,15 +341,23 @@ def test_invalid_patch_bodies_are_rejected(data: dict[str, Any]) -> None:
         s.EventEndPatch.model_validate(data)
 
 
+def _extra(**overrides: Any) -> dict[str, Any]:
+    extra: dict[str, Any] = heartbeat_dict()["extra"]
+    extra.update(overrides)
+    return extra
+
+
 INVALID_HEARTBEATS: dict[str, dict[str, Any]] = {
     "unknown status": heartbeat_dict(status="offline"),
     "negative fps": heartbeat_dict(fps=-1),
     "empty model name": heartbeat_dict(model_name=""),
     "unknown field": heartbeat_dict(gpu=1),
-    "unknown stream state": heartbeat_dict(extra={**heartbeat_dict()["extra"], "stream": "up"}),
-    "unknown extra field": heartbeat_dict(extra={**heartbeat_dict()["extra"], "temp": 70}),
-    "negative queue depth": heartbeat_dict(extra={**heartbeat_dict()["extra"], "queue_depth": -1}),
+    "unknown stream state": heartbeat_dict(extra=_extra(stream="up")),
+    "negative queue depth": heartbeat_dict(extra=_extra(queue_depth=-1)),
     "missing extra": {k: v for k, v in heartbeat_dict().items() if k != "extra"},
+    "unknown supported_ppe code": heartbeat_dict(extra=_extra(supported_ppe=["helmet", "cape"])),
+    "supported_ppe not a list": heartbeat_dict(extra=_extra(supported_ppe="helmet")),
+    "supported_ppe of numbers": heartbeat_dict(extra=_extra(supported_ppe=[1, 2])),
 }
 
 
@@ -356,6 +365,36 @@ INVALID_HEARTBEATS: dict[str, dict[str, Any]] = {
 def test_invalid_heartbeats_are_rejected(case: str) -> None:
     with pytest.raises(ValidationError):
         s.HeartbeatPayload.model_validate(INVALID_HEARTBEATS[case])
+
+
+def test_heartbeat_extra_is_free_form() -> None:
+    # Contract 4.2: extra is free-form; unknown keys are accepted and sent as they are.
+    extra = _extra(temp_c=70, gpu={"name": "GTX 1660 SUPER", "util": [0.4, 0.5]}, note=None)
+    payload = s.HeartbeatPayload.model_validate(heartbeat_dict(extra=extra))
+    dumped = json.loads(payload.model_dump_json())
+    assert dumped["extra"] == extra
+    assert s.HeartbeatPayload.model_validate_json(payload.model_dump_json()) == payload
+    message = s.HeartbeatMessage.model_validate(
+        {**heartbeat_dict(extra=extra), "type": "heartbeat"}
+    )
+    assert json.loads(message.model_dump_json())["extra"] == extra
+
+
+def test_heartbeat_supported_ppe_is_sent_when_known_and_left_out_when_unknown() -> None:
+    codes = ["helmet", "vest", "glasses", "gloves", "mask", "boots", "earmuffs", "face_shield"]
+    known = s.HeartbeatPayload.model_validate(heartbeat_dict(extra=_extra(supported_ppe=codes)))
+    assert known.extra.supported_ppe == codes
+    assert json.loads(known.model_dump_json())["extra"]["supported_ppe"] == codes
+    assert known.model_dump(mode="json")["extra"]["supported_ppe"] == codes
+    assert s.HeartbeatPayload.model_validate_json(known.model_dump_json()) == known
+    # The contract asks both sides to tolerate the key being absent: unknown = not sent at all.
+    for extra in (_extra(), _extra(supported_ppe=None)):
+        unknown = s.HeartbeatPayload.model_validate(heartbeat_dict(extra=extra))
+        assert unknown.extra.supported_ppe is None
+        assert "supported_ppe" not in json.loads(unknown.model_dump_json())["extra"]
+        assert "supported_ppe" not in unknown.model_dump(mode="json")["extra"]
+    empty = s.HeartbeatPayload.model_validate(heartbeat_dict(extra=_extra(supported_ppe=[])))
+    assert json.loads(empty.model_dump_json())["extra"]["supported_ppe"] == []
 
 
 def test_heartbeat_fps_is_rounded() -> None:
@@ -545,11 +584,33 @@ def _config_with_rules(**rule_overrides: Any) -> dict[str, Any]:
 
 
 INVALID_CONFIGS: dict[str, dict[str, Any]] = {
+    # Problems of the configuration itself still reject it (the cached config stays in use).
+    "duplicate zone ids": {**config_dict(), "zones": config_dict()["zones"] * 2},
+    "min_confidence above 1": {**config_dict(), "thresholds": {"min_confidence": 2}},
+    "zero confirm_frames threshold": {**config_dict(), "thresholds": {"confirm_frames": 0}},
+    "thresholds not a mapping": {**config_dict(), "thresholds": "fast"},
+    "zones not a list": {**config_dict(), "zones": {"id": "zone-press-2"}},
+    "ppe_types not a list": {**config_dict(), "ppe_types": "helmet"},
+    "version not an integer": {**config_dict(), "version": "forty-two"},
+    "frame_size_hint with one value": {**config_dict(), "frame_size_hint": [1280]},
+    "unparseable updated_at": {**config_dict(), "updated_at": "yesterday"},
+    "invalid camera id": {**config_dict(), "camera": {"id": ""}},
+    "null camera": {**config_dict(), "camera": None},
+    "missing camera": {k: v for k, v in config_dict().items() if k != "camera"},
+}
+
+
+@pytest.mark.parametrize("case", sorted(INVALID_CONFIGS))
+def test_invalid_configs_are_rejected(case: str) -> None:
+    with pytest.raises(ValidationError):
+        s.CameraConfig.model_validate(INVALID_CONFIGS[case])
+
+
+ZONE_PROBLEMS: dict[str, dict[str, Any]] = {
     "polygon point outside 0..1": _config_with_zone(polygon=[[0.1, 0.1], [1.5, 0.1], [0.5, 0.5]]),
     "polygon with two points": _config_with_zone(polygon=[[0.1, 0.1], [0.5, 0.5]]),
     "polygon not a list": _config_with_zone(polygon="square"),
     "polygon point with three values": _config_with_zone(polygon=[[0.1, 0.1, 0.1]] * 3),
-    "duplicate zone ids": {**config_dict(), "zones": config_dict()["zones"] * 2},
     "schedule hour 25": _config_with_rules(
         schedule=[{"days": [1], "from": "25:00", "to": "26:00"}]
     ),
@@ -563,16 +624,144 @@ INVALID_CONFIGS: dict[str, dict[str, Any]] = {
     "negative max persons": _config_with_rules(max_persons=-1),
     "zero confirm frames": _config_with_rules(confirm_frames=0),
     "unknown severity override": _config_with_rules(severity_override="extreme"),
-    "min_confidence above 1": {**config_dict(), "thresholds": {"min_confidence": 2}},
-    "invalid camera id": {**config_dict(), "camera": {"id": ""}},
-    "missing camera": {k: v for k, v in config_dict().items() if k != "camera"},
+}
+
+_GOOD_ZONE: dict[str, Any] = {
+    "id": "zone-good",
+    "name": "Good",
+    "type": "ppe",
+    "polygon": [[0.6, 0.6], [0.9, 0.6], [0.9, 0.9]],
+    "rules": {"required_ppe": ["vest"]},
 }
 
 
-@pytest.mark.parametrize("case", sorted(INVALID_CONFIGS))
-def test_invalid_configs_are_rejected(case: str) -> None:
-    with pytest.raises(ValidationError):
-        s.CameraConfig.model_validate(INVALID_CONFIGS[case])
+@pytest.mark.parametrize("case", sorted(ZONE_PROBLEMS))
+def test_an_invalid_zone_is_dropped_and_the_config_stays_valid(
+    case: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    data = copy.deepcopy(ZONE_PROBLEMS[case])
+    data["zones"].append(copy.deepcopy(_GOOD_ZONE))
+    with caplog.at_level(logging.WARNING, logger="safety_ai.backend.schemas"):
+        config = s.CameraConfig.model_validate(data)
+    # One malformed zone must not take the camera offline: the rest of the config applies.
+    assert [zone.id for zone in config.zones] == ["zone-good"]
+    assert config.version == 42 and config.thresholds.confirm_frames == 8
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("ignoring invalid zone #0 (zone-press-2): ")
+
+
+@pytest.mark.parametrize("case", sorted(ZONE_PROBLEMS))
+def test_strict_zones_context_reports_an_invalid_zone(case: str) -> None:
+    # Operator-written files (--zones, scenarios) validate strictly with a readable location.
+    with pytest.raises(ValidationError) as info:
+        s.CameraConfig.model_validate(ZONE_PROBLEMS[case], context={s.STRICT_ZONES: True})
+    assert all(error["loc"][:2] == ("zones", 0) for error in info.value.errors())
+    lenient = s.CameraConfig.model_validate(ZONE_PROBLEMS[case], context={s.STRICT_ZONES: False})
+    assert lenient.zones == []
+
+
+def test_a_zone_that_is_not_an_object_is_dropped(caplog: pytest.LogCaptureFixture) -> None:
+    data = {**config_dict(), "zones": ["zone-press-2", None, config_dict()["zones"][0]]}
+    with caplog.at_level(logging.WARNING, logger="safety_ai.backend.schemas"):
+        config = s.CameraConfig.model_validate(data)
+    assert [zone.id for zone in config.zones] == ["zone-press-2"]
+    assert "ignoring invalid zone #0 (None)" in caplog.text
+    assert "ignoring invalid zone #1 (None)" in caplog.text
+
+
+def test_null_containers_and_values_are_tolerated() -> None:
+    data = {
+        "camera": {"id": "cam-1", "name": None, "stream_url": None, "stream_type": None},
+        "frame_size_hint": None,
+        "thresholds": None,
+        "ppe_types": None,
+        "zones": None,
+        "version": None,
+        "updated_at": None,
+    }
+    config = s.CameraConfig.model_validate(data)
+    assert config.thresholds == s.Thresholds()
+    assert config.ppe_types == list(s.PPE_CODE_VALUES)
+    assert config.zones == []
+    assert config.version == 0
+    assert config.frame_size_hint is None and config.updated_at is None
+    # Null threshold values mean "use the local thresholds".
+    nulled = s.CameraConfig.model_validate(
+        {
+            "camera": {"id": "cam-1"},
+            "thresholds": {"confirm_frames": None, "cooldown_sec": None, "min_confidence": None},
+        }
+    )
+    assert nulled.thresholds == s.Thresholds()
+
+
+def test_null_zone_rules_and_enabled_are_tolerated() -> None:
+    zone = {"id": "z1", "polygon": [[0.1, 0.1], [0.9, 0.1], [0.5, 0.9]]}
+    config = s.CameraConfig.model_validate(
+        {
+            "camera": {"id": "cam-1"},
+            "zones": [
+                {**zone, "rules": None, "enabled": None},
+                {**zone, "id": "z2", "rules": dict.fromkeys(s.ZoneRules.model_fields)},
+                {**zone, "id": "z3", "enabled": False, "name": "Off"},
+            ],
+        }
+    )
+    first, second, third = config.zones
+    assert first.rules == s.ZoneRules() and first.enabled is True
+    assert second.rules == s.ZoneRules() and second.enabled is True
+    assert third.enabled is False
+    # Every zone gets its own rules object (no shared mutable default).
+    assert first.rules is not second.rules
+
+
+def test_the_website_config_response_parses() -> None:
+    # The exact shape GET /api/v1/ingest/config/{camera_id} returned in the inventory
+    # (reports/inventory/website_responses.md): UUID ids, two zones, every rule key present.
+    data = {
+        "camera": {
+            "id": "d7f53f74-8586-4820-8c5a-0034b514dd07",
+            "name": "Пресс №2",
+            "stream_url": "/demo/cam1.mp4",
+            "stream_type": "file",
+        },
+        "frame_size_hint": [1280, 720],
+        "thresholds": {"confirm_frames": 8, "cooldown_sec": 60, "min_confidence": 0.5},
+        "ppe_types": list(s.PPE_CODE_VALUES),
+        "zones": [
+            {
+                "id": "cbf7f761-4616-4c7a-b8cd-3460344fd764",
+                "name": "Пресс №2",
+                "type": "danger",
+                "polygon": [[0.12, 0.2], [0.6, 0.2], [0.6, 0.8], [0.12, 0.8]],
+                "rules": {
+                    "required_ppe": ["helmet"],
+                    "entry_forbidden": False,
+                    "max_persons": 2,
+                    "min_vehicle_distance_m": None,
+                    "schedule": [{"days": [1, 2, 3, 4, 5, 6, 7], "from": "00:00", "to": "24:00"}],
+                    "confirm_frames": 8,
+                    "cooldown_sec": 60,
+                    "severity_override": None,
+                },
+            },
+            {
+                "id": "8233a1f4-8511-44ba-89be-19aacca9da06",
+                "name": "Вход на участок",
+                "type": "ppe",
+                "polygon": [[0.7, 0.1], [0.95, 0.1], [0.95, 0.5], [0.7, 0.5]],
+                "rules": {"required_ppe": ["vest"], "confirm_frames": None, "cooldown_sec": None},
+            },
+        ],
+        "version": 3,
+        "updated_at": "2026-11-04T15:03:51Z",
+    }
+    config = s.CameraConfig.model_validate(data)
+    assert [zone.type for zone in config.zones] == ["danger", "ppe"]
+    schedule = config.zones[0].rules.schedule
+    assert schedule is not None and schedule[0].days == [1, 2, 3, 4, 5, 6, 7]
+    assert config.zones[1].rules.confirm_frames is None
 
 
 def test_polygon_points_within_tolerance_are_clamped() -> None:

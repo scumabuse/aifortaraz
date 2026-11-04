@@ -177,11 +177,14 @@ def test_report_json_document(fake_clock):
         "processed_fps": 11.8,
         "last_frame_age_s": 0.2,
         "backend_reachable": True,
+        "backend_unauthorized": False,
         "spool_depth": 0,
         "active_events": 1,
         "restarts": 0,
         "failed": False,
         "uptime_s": 120.0,
+        "config_version": None,
+        "error": None,
     }
     assert second["processed_fps"] is None
     assert second["healthy"] is False

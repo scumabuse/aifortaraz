@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from tools import mock_state as ms
-from tools.mock_models import validate_camera_config, validate_event_submission
+from tools.mock_models import ContractError, validate_camera_config, validate_event_submission
 
 # --------------------------------------------------------------------------------------------
 # Time helpers
@@ -65,9 +65,29 @@ def test_rate_limiter_is_per_key_and_clearable() -> None:
 
 def test_rate_limiter_handles_out_of_order_times() -> None:
     limiter = ms.SlidingRateLimiter(limit=2)
+    # 4.0, 4.5 and 5.0 span exactly 1 s: allowed at 2 per second whatever the arrival order
+    # (the same timestamps in order are allowed too, see the tests above).
     assert not limiter.observe("cam", 5.0)
     assert not limiter.observe("cam", 4.0)
-    assert limiter.observe("cam", 4.5)
+    assert not limiter.observe("cam", 4.5)
+    # A late message at 4.8 puts three messages (4.5, 4.8, 5.0) within 0.5 s.
+    assert limiter.observe("cam", 4.8)
+
+
+def test_rate_limiter_compares_late_messages_with_earlier_arrivals() -> None:
+    # The three messages within 0.5 s (4.5, 4.8, 5.0) did not arrive consecutively: a window of
+    # the last arrivals (3.0, 4.5, 4.8) would miss them; sorted timestamps do not.
+    limiter = ms.SlidingRateLimiter(limit=2)
+    assert [limiter.observe("cam", t) for t in (5.0, 3.0, 4.5)] == [False, False, False]
+    assert limiter.observe("cam", 4.8)
+    # Bounded history: only the latest timestamps by time are kept.
+    small = ms.SlidingRateLimiter(limit=1, history=2)
+    assert [small.observe("cam", t) for t in (10.0, 20.0, 30.0)] == [False, False, False]
+    # 10.0 was dropped, so a late 10.5 cannot be compared with it any more.
+    assert not small.observe("cam", 10.5)
+    assert small.observe("cam", 30.5)
+    assert small.history == 2
+    assert ms.SlidingRateLimiter(limit=15).history == 64
 
 
 def test_rate_limiter_bounds_its_keys(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -79,10 +99,15 @@ def test_rate_limiter_bounds_its_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not limiter.observe("a", 0.1)
 
 
-@pytest.mark.parametrize(("limit", "window", "tolerance"), [(0, 1.0, 0.05), (5, 0.05, 0.05)])
-def test_rate_limiter_validates_its_parameters(limit: int, window: float, tolerance: float) -> None:
+@pytest.mark.parametrize(
+    ("limit", "window", "tolerance", "history"),
+    [(0, 1.0, 0.05, None), (5, 0.05, 0.05, None), (5, 1.0, 0.05, 5)],
+)
+def test_rate_limiter_validates_its_parameters(
+    limit: int, window: float, tolerance: float, history: int | None
+) -> None:
     with pytest.raises(ValueError):
-        ms.SlidingRateLimiter(limit=limit, window_s=window, tolerance_s=tolerance)
+        ms.SlidingRateLimiter(limit=limit, window_s=window, tolerance_s=tolerance, history=history)
 
 
 # --------------------------------------------------------------------------------------------
@@ -97,7 +122,9 @@ def test_fault_injector_consumes_rules_in_order() -> None:
     assert faults.take("heartbeat") == ms.FaultHit(500, 2)
     assert faults.take("heartbeat") is None
     assert faults.take("events") == ms.FaultHit(503, None)
-    assert faults.pending() == [{"status": 503, "remaining": 1, "path": "events", "retry_after": None}]
+    assert faults.pending() == [
+        {"status": 503, "remaining": 1, "path": "events", "retry_after": None}
+    ]
     assert faults.take("events") == ms.FaultHit(503, None)
     assert faults.take("events") is None
     assert faults.pending() == []
@@ -358,7 +385,9 @@ def test_config_store_replace_and_overrides(tmp_path: Path, payloads: Any, clock
     assert store.severity_override("cam-9", "zone-press-2") is None
     replacement = payloads.config()
     replacement["zones"][0]["rules"]["severity_override"] = None
-    assert store.replace("cam-1", validate_camera_config(replacement)) == ms.ConfigChange("cam-1", 43)
+    assert store.replace("cam-1", validate_camera_config(replacement)) == ms.ConfigChange(
+        "cam-1", 43
+    )
     assert store.severity_override("cam-1", "zone-press-2") is None
     with pytest.raises(ValueError, match="does not match the path camera_id"):
         store.replace("cam-2", validate_camera_config(payloads.config()))
@@ -433,3 +462,106 @@ def test_state_error_reply_text_is_bounded(small_state: ms.MockState) -> None:
     assert reply is not None
     assert len(reply["message"]) == 1000
     assert reply["message"].endswith("...")
+
+
+# --------------------------------------------------------------------------------------------
+# Contract error bodies
+# --------------------------------------------------------------------------------------------
+
+
+def test_error_body_has_the_contract_shape() -> None:
+    assert ms.error_body(404, "unknown camera 'cam-9'") == {
+        "error": {"code": "not_found", "message": "unknown camera 'cam-9'", "details": {}}
+    }
+    details = {"fields": [{"location": ["fps"], "message": "too low"}]}
+    assert ms.error_body(422, "invalid heartbeat", details)["error"]["details"] == details
+    for status, code in ((401, "unauthorized"), (409, "conflict"), (413, "payload_too_large")):
+        assert ms.error_body(status, "x")["error"]["code"] == code
+    assert ms.error_body(415, "x")["error"]["code"] == "unsupported_media_type"
+    assert ms.error_body(418, "x")["error"]["code"] == "http_error"
+
+
+def test_field_errors_split_locations_like_the_website() -> None:
+    assert ms.field_errors(
+        [
+            "details.boxes.0.bbox: x + w = 1.2000 exceeds 1",
+            "<body>: must be a JSON object",
+            "Content-Type: text/plain, expected application/json",
+            "a message without a location",
+            "invalid YAML: mapping values are not allowed here",
+        ]
+    ) == [
+        {"location": ["details", "boxes", 0, "bbox"], "message": "x + w = 1.2000 exceeds 1"},
+        {"location": ["<body>"], "message": "must be a JSON object"},
+        {"location": ["Content-Type"], "message": "text/plain, expected application/json"},
+        {"location": [], "message": "a message without a location"},
+        {"location": [], "message": "invalid YAML: mapping values are not allowed here"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "expected"),
+    [
+        (
+            ContractError("invalid stats", ["persons_total: too low"]),
+            None,
+            (422, "validation_error", "invalid stats"),
+        ),
+        (
+            ContractError("too big", ["snapshot: 6 MB"], status=413),
+            None,
+            (413, "payload_too_large", "too big"),
+        ),
+        (
+            ContractError("unauthorized", ["X-API-Key is missing"], status=401),
+            None,
+            (401, "unauthorized", "X-API-Key is missing"),
+        ),
+        (
+            ContractError("wrong type", ["Content-Type: x"]),
+            415,
+            (415, "unsupported_media_type", "wrong type"),
+        ),
+    ],
+)
+def test_reject_records_a_violation_and_answers_with_the_contract_body(
+    small_state: ms.MockState,
+    error: ContractError,
+    status: int | None,
+    expected: tuple[int, str, str],
+) -> None:
+    outcome = small_state.reject("POST /x", error, "{}", status=status)
+    code, name, message = expected
+    assert outcome.status == code
+    assert outcome.body["error"]["code"] == name
+    assert outcome.body["error"]["message"] == message
+    details = outcome.body["error"]["details"]
+    assert details == ({} if code == 401 else {"fields": ms.field_errors(error.errors)})
+    assert small_state.violations()[0]["reason"] == error.reason
+    assert small_state.summary()["http"]["POST /x"] == {str(code): 1}
+
+
+def test_config_store_zone_lookup(tmp_path: Path, payloads: Any, clock: Any) -> None:
+    path = _write_yaml(tmp_path / "cfg.yaml", {"cameras": [payloads.config()]})
+    store = ms.ConfigStore(path, clock)
+    store.load()
+    zone = store.zone("cam-1", "zone-press-2")
+    assert zone is not None and zone.type == "danger"
+    assert store.zone("cam-1", "zone-other") is None
+    assert store.zone("cam-1", None) is None
+    assert store.zone("cam-9", "zone-press-2") is None
+
+
+def test_accepted_events_get_the_website_severity(
+    small_state: ms.MockState, payloads: Any, jpeg: Any
+) -> None:
+    # cam1-press-danger is a danger zone without override: a missing helmet there is high.
+    danger = payloads.event(zone_id="cam1-press-danger")
+    assert _accept(small_state, danger, jpeg).body["severity"] == "high"
+    # cam-2's forklift aisle overrides with critical; an explicit payload value still wins.
+    aisle = payloads.event(camera_id="cam-2", zone_id="cam2-forklift-aisle", track_id=5)
+    assert _accept(small_state, aisle, jpeg).body["severity"] == "critical"
+    explicit = payloads.event(
+        camera_id="cam-2", zone_id="cam2-forklift-aisle", track_id=6, severity="low"
+    )
+    assert _accept(small_state, explicit, jpeg).body["severity"] == "low"

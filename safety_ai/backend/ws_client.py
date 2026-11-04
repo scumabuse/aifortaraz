@@ -11,6 +11,10 @@ server's ``config.updated`` and ``error`` messages.
 - Reconnects use exponential backoff ``1, 2, 4 ... 30 s`` plus up to 10 % jitter; the backoff
   starts over only after a connection stayed up for ``stable_after_s`` (no reconnect storm when a
   server accepts and immediately closes).
+- A handshake refused with HTTP 401/403 (wrong or revoked API key; the website answers 403) is
+  logged with the readable :func:`~.rest_client.auth_error_message` at ERROR at most once per
+  ``auth_log_interval_s`` (60 s) and retried every ``auth_retry_s`` (10 s, fixed);
+  :attr:`WsClient.unauthorized` is True until a connection succeeds.
 - Incoming text is parsed as JSON and then with :func:`~.schemas.parse_server_message`;
   ``error`` messages are logged at WARNING with their offending message id; every recognised
   message is passed to ``on_server_message`` on the client's loop thread (keep it short and
@@ -30,16 +34,18 @@ import random
 import threading
 import traceback
 from collections.abc import Callable, Iterable, Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final, Literal
 from urllib.parse import quote
 
 from pydantic import ValidationError
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import ConnectionClosed, InvalidURI, WebSocketException
+from websockets.exceptions import ConnectionClosed, InvalidStatus, InvalidURI, WebSocketException
 from websockets.uri import parse_uri
 
 from safety_ai import __version__
 from safety_ai.backend.backoff import Backoff
+from safety_ai.backend.rest_client import AUTH_ERROR_STATUSES, ENDPOINT_WS, auth_error_message
 from safety_ai.backend.schemas import (
     ConfigUpdatedMessage,
     DetectionsMessage,
@@ -133,6 +139,8 @@ class WsClient:
         ping_timeout_s: Seconds to wait for a pong before the connection is considered dead.
         stable_after_s: A connection that lived at least this long resets the backoff.
         proxy: websockets ``proxy`` argument (True = system proxy settings, None = direct).
+        auth_retry_s: Fixed reconnect delay after a handshake refused with HTTP 401/403.
+        auth_log_interval_s: At most one refused-key ERROR line per this many seconds.
 
     Raises:
         ValueError: When ``ws_url`` is not a valid ws:// or wss:// URI or a size is invalid.
@@ -155,10 +163,16 @@ class WsClient:
         ping_timeout_s: float | None = 20.0,
         stable_after_s: float = 10.0,
         proxy: str | Literal[True] | None = True,
+        auth_retry_s: float = 10.0,
+        auth_log_interval_s: float = 60.0,
     ) -> None:
         """Validate the URL and settings; the connection starts with :meth:`start`."""
         if max_queue < 1:
             raise ValueError("max_queue must be >= 1")
+        if auth_retry_s <= 0:
+            raise ValueError("auth_retry_s must be > 0")
+        if auth_log_interval_s < 0:
+            raise ValueError("auth_log_interval_s must be >= 0")
         Backoff(backoff_initial, backoff_max)  # validates the backoff parameters early
         secrets = [api_key, quote(api_key, safe="")] if api_key else []
         self._log = _MaskingAdapter(_log, secrets)
@@ -182,6 +196,14 @@ class WsClient:
         self._ping_timeout_s = ping_timeout_s
         self._stable_after_s = stable_after_s
         self._proxy: str | Literal[True] | None = proxy
+        self._auth_retry_s = auth_retry_s
+        self._auth_log_interval_s = auth_log_interval_s
+        self._auth_refused = False
+        self._last_attempt_refused = False
+        self._auth_errors = 0
+        self._last_auth_error_at: datetime | None = None
+        self._auth_last_log: float | None = None
+        self._auth_suppressed = 0
         self._lock = threading.Lock()
         self._pending: collections.deque[str] = collections.deque()
         self._connected = threading.Event()
@@ -237,6 +259,24 @@ class WsClient:
         """Messages waiting in the outgoing queue."""
         with self._lock:
             return len(self._pending)
+
+    @property
+    def unauthorized(self) -> bool:
+        """True after a handshake refused with HTTP 401/403, until a connection succeeds."""
+        with self._lock:
+            return self._auth_refused
+
+    @property
+    def last_auth_error_at(self) -> datetime | None:
+        """Aware UTC time of the latest handshake refused with 401/403 (None: never)."""
+        with self._lock:
+            return self._last_auth_error_at
+
+    @property
+    def auth_error_count(self) -> int:
+        """Handshakes refused with HTTP 401/403 since the client was created."""
+        with self._lock:
+            return self._auth_errors
 
     def wait_connected(self, timeout_s: float) -> bool:
         """Block up to ``timeout_s`` until connected; returns :attr:`connected`."""
@@ -337,6 +377,7 @@ class WsClient:
                 with self._lock:
                     self._reconnects += 1
             first_attempt = False
+            self._last_attempt_refused = False
             try:
                 ws = await self._open(stop_event)
                 if ws is not None and await self._session(ws, stop_event, wake):
@@ -345,8 +386,11 @@ class WsClient:
                 self._log.error("websocket client error: %s", _format_exception(exc))
             if stop_event.is_set():
                 break
-            delay = backoff.next_delay()
-            delay += self._rng.uniform(0.0, _JITTER_RATIO * delay)
+            if self._last_attempt_refused:
+                delay = self._auth_retry_s  # a refused key: fixed pace, no backoff growth
+            else:
+                delay = backoff.next_delay()
+                delay += self._rng.uniform(0.0, _JITTER_RATIO * delay)
             self._log.info("websocket reconnecting in %.1f s", delay)
             with contextlib.suppress(asyncio.TimeoutError, TimeoutError):
                 await asyncio.wait_for(stop_event.wait(), timeout=delay)
@@ -367,13 +411,51 @@ class WsClient:
             ws = connect_task.result()
         except (OSError, asyncio.TimeoutError, TimeoutError, WebSocketException) as exc:
             self._failures += 1
+            status = exc.response.status_code if isinstance(exc, InvalidStatus) else None
+            if status in AUTH_ERROR_STATUSES:
+                self._note_key_refused(status)
+                return None
             level = logging.WARNING if self._failures == 1 else logging.INFO
             self._log.log(
                 level, "websocket connection to %s failed: %s", self._masked_url, _describe(exc)
             )
             return None
         self._failures = 0
+        with self._lock:
+            recovered = self._auth_refused
+            self._auth_refused = False
+        if recovered:
+            self._auth_last_log = None
+            self._auth_suppressed = 0
+            self._log.info("backend accepts the API key again (websocket connected)")
         return ws
+
+    def _note_key_refused(self, status: int | None) -> None:
+        """A 401/403 handshake: mark the key refused and log the readable line (rate-limited)."""
+        self._last_attempt_refused = True
+        with self._lock:
+            self._auth_refused = True
+            self._auth_errors += 1
+            self._last_auth_error_at = self._clock.now_utc()
+        now = self._clock.monotonic()
+        if (
+            self._auth_last_log is not None
+            and now - self._auth_last_log < self._auth_log_interval_s
+        ):
+            self._auth_suppressed += 1
+            self._log.debug("websocket handshake refused again (HTTP %s)", status)
+            return
+        suppressed = self._auth_suppressed
+        self._auth_last_log = now
+        self._auth_suppressed = 0
+        note = f" ({suppressed} similar refusals since the last report)" if suppressed else ""
+        self._log.error(
+            "%s; detections, frames and heartbeat copies are dropped and the connection is "
+            "retried every %g s%s",
+            auth_error_message(status, ENDPOINT_WS),
+            self._auth_retry_s,
+            note,
+        )
 
     async def _connect(self) -> ClientConnection:
         headers = {"X-API-Key": self._api_key} if self._api_key is not None else None

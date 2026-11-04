@@ -18,7 +18,7 @@ backend:
   push_frames: false
 
 models:
-  ppe: ppe_n_latest
+  ppe: ppe_cppe_latest  # Construction-PPE YOLO26n (registry alias); SH17 fallback: ppe_n_latest
   pose: pose_n
   vehicle: same_as_ppe
   imgsz: 640

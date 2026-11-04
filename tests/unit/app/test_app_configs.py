@@ -26,7 +26,7 @@ def test_demo_integration_targets_the_website(app_kit: Any) -> None:
     assert settings.backend.api_key.get_secret_value() == "ot_k"
     assert settings.backend.ws is True and settings.backend.push_frames is False
     models = settings.models
-    assert (models.ppe, models.imgsz, models.device) == ("ppe_n_latest", 640, "auto")
+    assert (models.ppe, models.imgsz, models.device) == ("ppe_cppe_latest", 640, "auto")
     assert settings.processing.target_fps == 10
     assert settings.output.expose is True and settings.output.mjpeg_port == 8001
     assert settings.telemetry.metrics_port == 9100

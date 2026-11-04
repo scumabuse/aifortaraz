@@ -1,8 +1,9 @@
 # Integration demo: the AI module next to the real website backend (aifortaraz/safety-inspector).
 #
 #   1. build the demo videos once:   python tools/make_demo_videos.py
-#   2. create an API key in the website (Settings -> API keys) and export it:
-#        set SAFETY_AI_API_KEY=ot_...            (PowerShell: $env:SAFETY_AI_API_KEY = "ot_...")
+#   2. the API key and the backend URL come from the integration root: `make init` writes the
+#      seeded key (SEED_AI_API_KEY = SAFETY_AI_API_KEY) and SAFETY_AI_BACKEND_URL into safety-ai/.env;
+#      standalone, export SAFETY_AI_API_KEY yourself (PowerShell: $env:SAFETY_AI_API_KEY = "...")
 #   3. safety-ai run --config configs/demo_integration.yaml
 #
 # Zones, thresholds and PPE types come from the website (GET /api/v1/ingest/config, re-read every
@@ -18,7 +19,7 @@ backend:
   push_frames: false
 
 models:
-  ppe: ppe_n_latest
+  ppe: ppe_cppe_latest  # Construction-PPE YOLO26n (registry alias); SH17 fallback: ppe_n_latest
   pose: pose_n
   vehicle: same_as_ppe
   imgsz: 640

@@ -20,14 +20,18 @@ from sklearn.linear_model import LogisticRegression
 
 from safety_ai.clock import FakeClock
 from safety_ai.inference.types import (
+    KP_LEFT_ANKLE,
     KP_LEFT_EAR,
     KP_LEFT_EYE,
     KP_LEFT_HIP,
+    KP_LEFT_KNEE,
     KP_LEFT_SHOULDER,
     KP_NOSE,
+    KP_RIGHT_ANKLE,
     KP_RIGHT_EAR,
     KP_RIGHT_EYE,
     KP_RIGHT_HIP,
+    KP_RIGHT_KNEE,
     KP_RIGHT_SHOULDER,
     NUM_KEYPOINTS,
     BBox,
@@ -48,6 +52,7 @@ from safety_ai.logic.fall import (
     box_to_px,
     head_point_px,
     hip_center_px,
+    leg_angle_deg,
     shoulder_center_px,
     torso_angle_deg,
     window_feature_vector,
@@ -100,10 +105,14 @@ def _segment_box(seg: Segment, u: float) -> BBox:
             seg.feet[0] + (seg.feet_to[0] - seg.feet[0]) * u,
             seg.feet[1] + (seg.feet_to[1] - seg.feet[1]) * u,
         )
-    target = box_for_pose(seg.pose, feet, person_height_px=seg.height_px, frame_w=FRAME_W, frame_h=FRAME_H)
+    target = box_for_pose(
+        seg.pose, feet, person_height_px=seg.height_px, frame_w=FRAME_W, frame_h=FRAME_H
+    )
     if seg.morph_from is None:
         return target
-    start = box_for_pose(seg.morph_from, feet, person_height_px=seg.height_px, frame_w=FRAME_W, frame_h=FRAME_H)
+    start = box_for_pose(
+        seg.morph_from, feet, person_height_px=seg.height_px, frame_w=FRAME_W, frame_h=FRAME_H
+    )
     x, y, w, h = (a + (b - a) * u for a, b in zip(start, target, strict=True))
     return (x, y, w, h)
 
@@ -137,17 +146,32 @@ def run_sequence(
             box_px = box_to_px(box, FRAME_W, FRAME_H)
             while history and mono - history[0][0] > 2.0:
                 history.popleft()
-            selected = track_id in gate.select(index, mono, {track_id: box_px}, {track_id: list(history)})
+            selected = track_id in gate.select(
+                index, mono, {track_id: box_px}, {track_id: list(history)}
+            )
             if keypoints and selected:
-                kp_pose = seg.kp_pose or (seg.morph_from if seg.morph_from and u < 0.5 else seg.pose)
+                kp_pose = seg.kp_pose or (
+                    seg.morph_from if seg.morph_from and u < 0.5 else seg.pose
+                )
                 kp = synthesize_pose(
-                    kp_pose, box, frame_w=FRAME_W, frame_h=FRAME_H, phase=seg.cadence_hz * index * DT, conf=conf
+                    kp_pose,
+                    box,
+                    frame_w=FRAME_W,
+                    frame_h=FRAME_H,
+                    phase=seg.cadence_hz * index * DT,
+                    conf=conf,
                 )
                 if seg.kp_transform is not None:
                     kp = seg.kp_transform(kp, box)
                 cache = (kp, mono)
             signals = detector.update(
-                track_id, mono, box_px, FRAME_W, FRAME_H, cache[0] if cache else None, cache[1] if cache else None
+                track_id,
+                mono,
+                box_px,
+                FRAME_W,
+                FRAME_H,
+                cache[0] if cache else None,
+                cache[1] if cache else None,
             )
             history.append((mono, box_px))
             steps.append(Step(index, seg.pose, mono, selected, signals))
@@ -169,7 +193,9 @@ def run_boxes(
     return out
 
 
-def first(steps: Sequence[Step], predicate: Callable[[FallSignals], bool], start: int = 0) -> int | None:
+def first(
+    steps: Sequence[Step], predicate: Callable[[FallSignals], bool], start: int = 0
+) -> int | None:
     for step in steps:
         if step.index >= start and predicate(step.signals):
             return step.index
@@ -202,13 +228,20 @@ def frames(seconds: float) -> int:
 FALL = (Segment("standing", 4.0), Segment("falling", 0.25), Segment("lying", 8.0))
 
 
-def kp_from_px(points: dict[int, tuple[float, float]], conf: float = 0.9, n: int = NUM_KEYPOINTS) -> Keypoints:
+def kp_from_px(
+    points: dict[int, tuple[float, float]], conf: float = 0.9, n: int = NUM_KEYPOINTS
+) -> Keypoints:
     """Keypoints from pixel positions (missing indices get confidence 0)."""
-    xy = tuple((points[i][0] / FRAME_W, points[i][1] / FRAME_H) if i in points else (0.0, 0.0) for i in range(n))
+    xy = tuple(
+        (points[i][0] / FRAME_W, points[i][1] / FRAME_H) if i in points else (0.0, 0.0)
+        for i in range(n)
+    )
     return Keypoints(xy=xy, conf=tuple(conf if i in points else 0.0 for i in range(n)))
 
 
-def torso_points(shoulder: tuple[float, float], hip: tuple[float, float]) -> dict[int, tuple[float, float]]:
+def torso_points(
+    shoulder: tuple[float, float], hip: tuple[float, float]
+) -> dict[int, tuple[float, float]]:
     return {
         KP_LEFT_SHOULDER: (shoulder[0] - 10, shoulder[1]),
         KP_RIGHT_SHOULDER: (shoulder[0] + 10, shoulder[1]),
@@ -241,7 +274,10 @@ def test_torso_angle_against_the_image_vertical(
 
 def test_torso_angle_requires_both_shoulders_and_both_hips() -> None:
     points = torso_points((500, 300), (500, 400))
-    xy = tuple((points[i][0] / FRAME_W, points[i][1] / FRAME_H) if i in points else (0.0, 0.0) for i in range(17))
+    xy = tuple(
+        (points[i][0] / FRAME_W, points[i][1] / FRAME_H) if i in points else (0.0, 0.0)
+        for i in range(17)
+    )
     for weak in (KP_LEFT_SHOULDER, KP_RIGHT_SHOULDER, KP_LEFT_HIP, KP_RIGHT_HIP):
         conf = tuple(0.29 if i == weak else (0.9 if i in points else 0.0) for i in range(17))
         assert torso_angle_deg(Keypoints(xy=xy, conf=conf), FRAME_W, FRAME_H) is None
@@ -250,7 +286,9 @@ def test_torso_angle_requires_both_shoulders_and_both_hips() -> None:
 
 
 def test_torso_angle_undefined_for_coincident_centres_non_finite_or_short_keypoints() -> None:
-    assert torso_angle_deg(kp_from_px(torso_points((500, 400), (500, 400))), FRAME_W, FRAME_H) is None
+    assert (
+        torso_angle_deg(kp_from_px(torso_points((500, 400), (500, 400))), FRAME_W, FRAME_H) is None
+    )
     points = torso_points((500, 300), (500, 400))
     points[KP_LEFT_HIP] = (math.nan, 400)
     assert torso_angle_deg(kp_from_px(points), FRAME_W, FRAME_H) is None
@@ -286,9 +324,74 @@ def test_centres_and_head_point() -> None:
     assert head_point_px(kp_from_px(points), FRAME_W, FRAME_H) == pytest.approx((510, 240))
 
 
+def legs_points(
+    ankles: tuple[tuple[float, float] | None, tuple[float, float] | None],
+    knees: tuple[tuple[float, float] | None, tuple[float, float] | None] = (None, None),
+) -> dict[int, tuple[float, float]]:
+    """A torso from (500, 300) to (500, 400) plus the given ankles and knees (None = missing)."""
+    points = torso_points((500, 300), (500, 400))
+    for index, point in zip(
+        (KP_LEFT_ANKLE, KP_RIGHT_ANKLE, KP_LEFT_KNEE, KP_RIGHT_KNEE), (*ankles, *knees), strict=True
+    ):
+        if point is not None:
+            points[index] = point
+    return points
+
+
+@pytest.mark.parametrize(
+    ("ankles", "angle"),
+    [
+        (((492, 500), (508, 500)), 0.0),
+        (((592, 392), (608, 408)), 90.0),
+        (((492, 300), (508, 300)), 180.0),
+        (((592, 492), (608, 508)), 45.0),
+        (((392, 492), (408, 508)), 45.0),
+        (((500, 500), None), 0.0),
+    ],
+)
+def test_leg_angle_against_the_downward_vertical(
+    ankles: tuple[tuple[float, float], tuple[float, float] | None], angle: float
+) -> None:
+    kp = kp_from_px(legs_points(ankles))
+    assert leg_angle_deg(kp, FRAME_W, FRAME_H) == pytest.approx(angle, abs=1e-9)
+
+
+def test_leg_angle_falls_back_to_the_knees_and_needs_the_torso() -> None:
+    knees_only = kp_from_px(legs_points((None, None), ((590, 400), (610, 400))))
+    assert leg_angle_deg(knees_only, FRAME_W, FRAME_H) == pytest.approx(90.0)
+    # The ankles win over the knees when they are reliable.
+    both = kp_from_px(legs_points(((500, 500), (500, 500)), ((590, 400), (610, 400))))
+    assert leg_angle_deg(both, FRAME_W, FRAME_H) == pytest.approx(0.0)
+    assert leg_angle_deg(kp_from_px(torso_points((500, 300), (500, 400))), FRAME_W, FRAME_H) is None
+    no_shoulders = legs_points(((500, 500), (500, 500)))
+    del no_shoulders[KP_LEFT_SHOULDER]
+    assert leg_angle_deg(kp_from_px(no_shoulders), FRAME_W, FRAME_H) is None
+    no_hips = legs_points(((500, 500), (500, 500)))
+    del no_hips[KP_RIGHT_HIP]
+    assert leg_angle_deg(kp_from_px(no_hips), FRAME_W, FRAME_H) is None
+    weak = legs_points(((500, 500), (500, 500)))
+    conf = tuple(
+        0.2 if i in (KP_LEFT_ANKLE, KP_RIGHT_ANKLE) else (0.9 if i in weak else 0.0)
+        for i in range(17)
+    )
+    xy = kp_from_px(weak).xy
+    assert leg_angle_deg(Keypoints(xy=xy, conf=conf), FRAME_W, FRAME_H) is None
+    assert leg_angle_deg(Keypoints(xy=xy, conf=conf), FRAME_W, FRAME_H, min_conf=0.2) == 0.0
+
+
+def test_leg_angle_is_undefined_for_short_legs_and_coincident_centres() -> None:
+    # Legs pointing at the camera project to a short vector: 40 px < 0.5 x the 100 px torso.
+    short = kp_from_px(legs_points(((500, 440), (500, 440))))
+    assert leg_angle_deg(short, FRAME_W, FRAME_H) is None
+    assert leg_angle_deg(short, FRAME_W, FRAME_H, min_ratio=0.3) == pytest.approx(0.0)
+    flat = torso_points((500, 400), (500, 400))
+    flat[KP_LEFT_ANKLE] = (500, 500)
+    assert leg_angle_deg(kp_from_px(flat), FRAME_W, FRAME_H) is None
+
+
 def test_helpers_reject_bad_frames() -> None:
     kp = kp_from_px(torso_points((500, 300), (500, 400)))
-    for call in (shoulder_center_px, hip_center_px, torso_angle_deg, head_point_px):
+    for call in (shoulder_center_px, hip_center_px, torso_angle_deg, head_point_px, leg_angle_deg):
         with pytest.raises(ValueError):
             call(kp, 0, FRAME_H)
     with pytest.raises(ValueError):
@@ -391,14 +494,24 @@ def test_gate_validation() -> None:
 
 def standing_kp(box_px: PxBox, conf: float = 0.9) -> Keypoints:
     x, y, w, h = box_px
-    return synthesize_pose("standing", (x / FRAME_W, y / FRAME_H, w / FRAME_W, h / FRAME_H), frame_w=FRAME_W, frame_h=FRAME_H, conf=conf)
+    return synthesize_pose(
+        "standing",
+        (x / FRAME_W, y / FRAME_H, w / FRAME_W, h / FRAME_H),
+        frame_w=FRAME_W,
+        frame_h=FRAME_H,
+        conf=conf,
+    )
 
 
 def test_extractor_box_centre_velocity_without_keypoints(fake_clock: FakeClock) -> None:
     extractor = FallFeatureExtractor()
     features: list[FallFeatures] = []
     for i in range(8):
-        features.append(extractor.update(fake_clock.monotonic(), (100.0, 100.0 + 10.0 * i, 80.0, 200.0), FRAME_W, FRAME_H))
+        features.append(
+            extractor.update(
+                fake_clock.monotonic(), (100.0, 100.0 + 10.0 * i, 80.0, 200.0), FRAME_W, FRAME_H
+            )
+        )
         fake_clock.advance(DT)
     assert features[0].hip_velocity is None
     assert features[0].velocity_source is None
@@ -416,7 +529,9 @@ def test_extractor_keypoint_velocity_from_fresh_keypoints(fake_clock: FakeClock)
         box = (100.0, 100.0 + 5.0 * i, 80.0, 200.0)
         # The hips move 12 px per frame although the box moves only 5 px per frame.
         kp = kp_from_px(torso_points((140.0, 150.0 + 12.0 * i), (140.0, 230.0 + 12.0 * i)))
-        results.append(extractor.update(mono, box, FRAME_W, FRAME_H, keypoints=kp, keypoints_mono=mono))
+        results.append(
+            extractor.update(mono, box, FRAME_W, FRAME_H, keypoints=kp, keypoints_mono=mono)
+        )
         fake_clock.advance(DT)
     assert results[0].hip_velocity is None
     for f in results[1:]:
@@ -436,7 +551,9 @@ def test_extractor_does_not_trust_the_box_while_keypoints_exist(fake_clock: Fake
     for i in range(1, 18):
         fake_clock.advance(DT)
         box = (100.0, 100.0 + 30.0 * i, 80.0, 300.0)  # fast box drop, cached keypoints only
-        f = extractor.update(fake_clock.monotonic(), box, FRAME_W, FRAME_H, keypoints=kp, keypoints_mono=t0)
+        f = extractor.update(
+            fake_clock.monotonic(), box, FRAME_W, FRAME_H, keypoints=kp, keypoints_mono=t0
+        )
         sources.append((round(fake_clock.monotonic() - t0, 3), f.velocity_source))
     # Within 1 s of the last reliable hips the velocity is unknown, afterwards the box is used.
     assert all(source is None for age, source in sources if age <= 1.0)
@@ -460,10 +577,16 @@ def test_extractor_keypoints_go_stale_by_age_and_by_box_height(fake_clock: FakeC
     box: PxBox = (100.0, 100.0, 80.0, 300.0)
     kp = standing_kp(box)
     t0 = fake_clock.monotonic()
-    assert extractor.update(t0, box, FRAME_W, FRAME_H, keypoints=kp, keypoints_mono=t0).keypoints_reliable
-    f = extractor.update(t0 + 0.5, (100.0, 160.0, 80.0, 210.0), FRAME_W, FRAME_H, keypoints=kp, keypoints_mono=t0)
+    assert extractor.update(
+        t0, box, FRAME_W, FRAME_H, keypoints=kp, keypoints_mono=t0
+    ).keypoints_reliable
+    f = extractor.update(
+        t0 + 0.5, (100.0, 160.0, 80.0, 210.0), FRAME_W, FRAME_H, keypoints=kp, keypoints_mono=t0
+    )
     assert f.keypoints_reliable  # height ratio 300 / 210 = 1.43
-    f = extractor.update(t0 + 0.6, (100.0, 200.0, 80.0, 190.0), FRAME_W, FRAME_H, keypoints=kp, keypoints_mono=t0)
+    f = extractor.update(
+        t0 + 0.6, (100.0, 200.0, 80.0, 190.0), FRAME_W, FRAME_H, keypoints=kp, keypoints_mono=t0
+    )
     assert not f.keypoints_reliable  # 300 / 190 = 1.58
     assert f.head_hip_gap is None
     assert f.pose_conf is None
@@ -566,11 +689,35 @@ def test_extractor_rejects_bad_input(fake_clock: FakeClock) -> None:
         {"velocity_span_s": 0.8, "velocity_max_dt_s": 0.7},
         {"history_s": 0.5},
         {"max_samples": 1},
+        {"min_leg_ratio": 0.0},
+        {"min_leg_ratio": math.inf},
     ],
 )
 def test_extractor_parameter_validation(kwargs: dict[str, float]) -> None:
     with pytest.raises(ValueError):
         FallFeatureExtractor(**kwargs)  # type: ignore[arg-type]
+
+
+def test_extractor_previous_frame_and_leg_angle(fake_clock: FakeClock) -> None:
+    extractor = FallFeatureExtractor()
+    assert extractor.previous is None
+    box: PxBox = (100.0, 100.0, 80.0, 300.0)
+    first_features = extractor.update(
+        fake_clock.monotonic(), box, FRAME_W, FRAME_H, keypoints=standing_kp(box)
+    )
+    assert extractor.previous is None
+    assert first_features.leg_angle_deg is not None
+    assert first_features.leg_angle_deg < 10.0
+    fake_clock.advance(DT)
+    second = extractor.update(fake_clock.monotonic(), box, FRAME_W, FRAME_H)
+    assert extractor.previous is first_features
+    assert extractor.latest is second
+    # The cached keypoints of the first frame still provide the posture and the legs.
+    assert second.leg_angle_deg == first_features.leg_angle_deg
+    # After a gap longer than the history the previous frame is gone.
+    fake_clock.advance(3.0)
+    extractor.update(fake_clock.monotonic(), box, FRAME_W, FRAME_H)
+    assert extractor.previous is None
 
 
 def test_features_properties() -> None:
@@ -625,9 +772,23 @@ def test_feature_names_are_unique_and_match_the_vector_length() -> None:
 
 def test_window_vector_values_for_a_crafted_window() -> None:
     samples = [
-        feature(10.0, (100.0, 100.0, 80.0, 200.0), torso_angle_deg=10.0, hip_velocity=0.5, head_hip_gap=0.4, pose_conf=0.8),
+        feature(
+            10.0,
+            (100.0, 100.0, 80.0, 200.0),
+            torso_angle_deg=10.0,
+            hip_velocity=0.5,
+            head_hip_gap=0.4,
+            pose_conf=0.8,
+        ),
         feature(10.5, (100.0, 150.0, 120.0, 150.0), hip_velocity=1.5),
-        feature(11.0, (90.0, 250.0, 200.0, 50.0), torso_angle_deg=80.0, hip_velocity=-0.2, head_hip_gap=0.1, pose_conf=0.6),
+        feature(
+            11.0,
+            (90.0, 250.0, 200.0, 50.0),
+            torso_angle_deg=80.0,
+            hip_velocity=-0.2,
+            head_hip_gap=0.1,
+            pose_conf=0.6,
+        ),
     ]
     v = dict(zip(FALL_FEATURE_NAMES, window_feature_vector(samples), strict=True))
     assert v["aspect_first"] == pytest.approx(0.4)
@@ -655,9 +816,18 @@ def test_window_vector_values_for_a_crafted_window() -> None:
 
 
 def test_window_vector_uses_zero_for_missing_values_and_clips() -> None:
-    samples = [feature(0.0, (0.0, 0.0, 50.0, 100.0)), feature(0.1, (0.0, 0.0, 5000.0, 0.5), hip_velocity=99.0)]
+    samples = [
+        feature(0.0, (0.0, 0.0, 50.0, 100.0)),
+        feature(0.1, (0.0, 0.0, 5000.0, 0.5), hip_velocity=99.0),
+    ]
     v = dict(zip(FALL_FEATURE_NAMES, window_feature_vector(samples), strict=True))
-    for name in ("torso_deg_first", "torso_deg_max", "torso_valid_frac", "head_hip_gap_last", "pose_conf_mean"):
+    for name in (
+        "torso_deg_first",
+        "torso_deg_max",
+        "torso_valid_frac",
+        "head_hip_gap_last",
+        "pose_conf_mean",
+    ):
         assert v[name] == 0.0
     assert v["aspect_last"] == 10.0
     assert v["hip_velocity_max"] == 10.0
@@ -669,7 +839,9 @@ def test_window_vector_rejects_empty_and_unordered_windows() -> None:
     with pytest.raises(ValueError):
         window_feature_vector([])
     with pytest.raises(ValueError):
-        window_feature_vector([feature(1.0, (0.0, 0.0, 5.0, 10.0)), feature(0.5, (0.0, 0.0, 5.0, 10.0))])
+        window_feature_vector(
+            [feature(1.0, (0.0, 0.0, 5.0, 10.0)), feature(0.5, (0.0, 0.0, 5.0, 10.0))]
+        )
 
 
 # --------------------------------------------------------------------------------------------
@@ -680,7 +852,9 @@ def test_window_vector_rejects_empty_and_unordered_windows() -> None:
 class FixedModel:
     """A stand-in classifier returning a fixed fall probability and recording its inputs."""
 
-    def __init__(self, proba: float, classes: Sequence[object] | None = (0, 1), n_features: int | None = None) -> None:
+    def __init__(
+        self, proba: float, classes: Sequence[object] | None = (0, 1), n_features: int | None = None
+    ) -> None:
         self.proba = proba
         if classes is not None:
             self.classes_ = list(classes)
@@ -750,15 +924,26 @@ def _training_set() -> tuple[list[tuple[float, ...]], list[int]]:
         clock = FakeClock(start_mono=100.0 * (k + 1))
         lying_x = 0.3 + 0.07 * k
         steps = run_sequence(
-            [Segment("standing", 3.0, feet=(lying_x, 0.85)), Segment("falling", 0.25, feet=(lying_x, 0.85)), Segment("lying", 3.0, feet=(lying_x, 0.85))],
+            [
+                Segment("standing", 3.0, feet=(lying_x, 0.85)),
+                Segment("falling", 0.25, feet=(lying_x, 0.85)),
+                Segment("lying", 3.0, feet=(lying_x, 0.85)),
+            ],
             clock,
         )
         landing = first_pose(steps, "lying")
-        detector_window = [s.signals.features for s in steps if steps[landing].mono - 1.0 - 1e-6 <= s.mono <= steps[landing].mono + 0.5 + 1e-6]
+        detector_window = [
+            s.signals.features
+            for s in steps
+            if steps[landing].mono - 1.0 - 1e-6 <= s.mono <= steps[landing].mono + 0.5 + 1e-6
+        ]
         vectors.append(window_feature_vector(detector_window))
         labels.append(1)
         for pose in ("standing", "walking", "bending", "sitting"):
-            steps = run_sequence([Segment(pose, 3.0, feet=(lying_x, 0.85), cadence_hz=1.0)], FakeClock(start_mono=50.0 * (k + 1)))
+            steps = run_sequence(
+                [Segment(pose, 3.0, feet=(lying_x, 0.85), cadence_hz=1.0)],
+                FakeClock(start_mono=50.0 * (k + 1)),
+            )
             vectors.append(window_feature_vector([s.signals.features for s in steps[-18:]]))
             labels.append(0)
     return vectors, labels
@@ -791,7 +976,9 @@ def test_classifier_load_accepts_a_bare_estimator(tmp_path: Path) -> None:
     assert 0.0 <= loaded.predict_proba(vectors[0]) <= 1.0
 
 
-def test_classifier_load_returns_none_when_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_classifier_load_returns_none_when_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     assert FallClassifier.load(tmp_path / "missing.joblib") is None
     path = tmp_path / "model.joblib"
     vectors, labels = _training_set()
@@ -857,10 +1044,21 @@ def test_fall_config_defaults_follow_the_spec() -> None:
     cfg = FallConfig()
     assert (cfg.horizontal_deg, cfg.upright_deg) == (60.0, 35.0)
     assert (cfg.horizontal_aspect, cfg.upright_aspect) == (1.3, 0.8)
-    assert (cfg.rapid_velocity, cfg.aspect_from, cfg.aspect_to, cfg.aspect_window_s) == (1.0, 0.8, 1.2, 0.7)
+    assert (cfg.rapid_velocity, cfg.aspect_from, cfg.aspect_to, cfg.aspect_window_s) == (
+        1.0,
+        0.8,
+        1.2,
+        0.7,
+    )
     assert (cfg.fall_persist_s, cfg.clear_s, cfg.window_s) == (2.0, 2.0, 1.5)
     assert (cfg.head_hip_max_gap, cfg.head_hip_hold_s, cfg.min_person_px) == (0.25, 1.0, 80.0)
-    assert (cfg.min_kp_conf, cfg.immobile_displacement_frac, cfg.classifier_threshold) == (0.3, 0.02, 0.5)
+    assert (cfg.min_kp_conf, cfg.immobile_displacement_frac, cfg.classifier_threshold) == (
+        0.3,
+        0.02,
+        0.5,
+    )
+    # The legs veto reuses the upright torso threshold of the spec.
+    assert (cfg.legs_upright_deg, cfg.min_leg_ratio) == (cfg.upright_deg, 0.5)
 
 
 @pytest.mark.parametrize(
@@ -884,6 +1082,9 @@ def test_fall_config_defaults_follow_the_spec() -> None:
         {"keypoint_max_height_ratio": 0.5},
         {"pose_every_n": 0},
         {"keypoint_max_age_s": 0.0},
+        {"legs_upright_deg": 90.0},
+        {"legs_upright_deg": -1.0},
+        {"min_leg_ratio": 0.0},
     ],
 )
 def test_fall_config_rejects_invalid_values(kwargs: dict[str, float]) -> None:
@@ -896,12 +1097,20 @@ def test_detector_construction_and_keypoint_staleness_limit() -> None:
     assert FallDetector(fps_hint=12.0).keypoint_max_age_s == pytest.approx(1.25)
     assert FallDetector(fps_hint=5.0).keypoint_max_age_s == pytest.approx(3.0)
     assert FallDetector(fps_hint=30.0).keypoint_max_age_s == 1.0
-    assert FallDetector(fps_hint=5.0, config=FallConfig(keypoint_max_age_s=0.4)).keypoint_max_age_s == 0.4
+    assert (
+        FallDetector(fps_hint=5.0, config=FallConfig(keypoint_max_age_s=0.4)).keypoint_max_age_s
+        == 0.4
+    )
     detector = FallDetector(immobile_sec=12.0, classifier=FallClassifier(FixedModel(0.9)))
     assert detector.immobile_sec == 12.0
     assert detector.classifier is not None
     assert detector.config == FallConfig()
-    for bad in ({"immobile_sec": 0.0}, {"immobile_sec": math.inf}, {"fps_hint": 0.0}, {"fps_hint": math.nan}):
+    for bad in (
+        {"immobile_sec": 0.0},
+        {"immobile_sec": math.inf},
+        {"fps_hint": 0.0},
+        {"fps_hint": math.nan},
+    ):
         with pytest.raises(ValueError):
             FallDetector(**bad)  # type: ignore[arg-type]
 
@@ -939,7 +1148,9 @@ def test_detector_invalid_input_does_not_create_state(fake_clock: FakeClock) -> 
 
 
 @pytest.mark.parametrize("with_keypoints", [True, False])
-def test_only_the_fall_triggers_and_exactly_two_seconds_after_landing(fake_clock: FakeClock, with_keypoints: bool) -> None:
+def test_only_the_fall_triggers_and_exactly_two_seconds_after_landing(
+    fake_clock: FakeClock, with_keypoints: bool
+) -> None:
     steps = run_sequence(FALL, fake_clock, keypoints=with_keypoints)
     landing = first_pose(steps, "lying")
     detected = first(steps, is_fall)
@@ -977,7 +1188,9 @@ def test_fall_is_driven_by_a_fast_keypoint_hip_drop(fake_clock: FakeClock) -> No
 
 
 @pytest.mark.parametrize("with_keypoints", [True, False])
-def test_fall_then_stand_up_clears_after_two_seconds_upright(fake_clock: FakeClock, with_keypoints: bool) -> None:
+def test_fall_then_stand_up_clears_after_two_seconds_upright(
+    fake_clock: FakeClock, with_keypoints: bool
+) -> None:
     steps = run_sequence(
         [*FALL[:2], Segment("lying", 5.0), Segment("kneeling", 1.0), Segment("standing", 4.0)],
         fake_clock,
@@ -992,7 +1205,9 @@ def test_fall_then_stand_up_clears_after_two_seconds_upright(fake_clock: FakeClo
     cleared = first(steps, lambda s: s.fall_cleared, start=detected)
     assert cleared is not None
     assert abs(cleared - (up + frames(2.0))) <= 1
-    assert all(not s.signals.fall_condition for s in steps if s.index >= first_pose(steps, "kneeling"))
+    assert all(
+        not s.signals.fall_condition for s in steps if s.index >= first_pose(steps, "kneeling")
+    )
 
 
 @pytest.mark.parametrize("with_keypoints", [True, False])
@@ -1000,8 +1215,14 @@ def test_fall_then_stand_up_clears_after_two_seconds_upright(fake_clock: FakeClo
     "segments",
     [
         pytest.param([Segment("standing", 20.0)], id="standing"),
-        pytest.param([Segment("walking", 8.0, feet=(0.1, 0.85), feet_to=(0.9, 0.85), cadence_hz=1.0)], id="walking"),
-        pytest.param([Segment("standing", 3.0), Segment("bending", 4.0), Segment("standing", 3.0)], id="bending"),
+        pytest.param(
+            [Segment("walking", 8.0, feet=(0.1, 0.85), feet_to=(0.9, 0.85), cadence_hz=1.0)],
+            id="walking",
+        ),
+        pytest.param(
+            [Segment("standing", 3.0), Segment("bending", 4.0), Segment("standing", 3.0)],
+            id="bending",
+        ),
         pytest.param(
             [
                 Segment("standing", 3.0),
@@ -1012,27 +1233,46 @@ def test_fall_then_stand_up_clears_after_two_seconds_upright(fake_clock: FakeClo
             ],
             id="bending-slowly",
         ),
-        pytest.param([Segment("standing", 3.0), Segment("kneeling", 8.0), Segment("standing", 3.0)], id="kneeling"),
-        pytest.param([Segment("standing", 3.0), Segment("sitting", 8.0), Segment("standing", 3.0)], id="sitting"),
         pytest.param(
-            [Segment("standing", 3.0), Segment("sitting", 0.5, morph_from="standing"), Segment("sitting", 6.0)],
+            [Segment("standing", 3.0), Segment("kneeling", 8.0), Segment("standing", 3.0)],
+            id="kneeling",
+        ),
+        pytest.param(
+            [Segment("standing", 3.0), Segment("sitting", 8.0), Segment("standing", 3.0)],
+            id="sitting",
+        ),
+        pytest.param(
+            [
+                Segment("standing", 3.0),
+                Segment("sitting", 0.5, morph_from="standing"),
+                Segment("sitting", 6.0),
+            ],
             id="sitting-down",
         ),
     ],
 )
-def test_daily_activities_never_trigger(fake_clock: FakeClock, with_keypoints: bool, segments: list[Segment]) -> None:
+def test_daily_activities_never_trigger(
+    fake_clock: FakeClock, with_keypoints: bool, segments: list[Segment]
+) -> None:
     steps = run_sequence(segments, fake_clock, keypoints=with_keypoints)
     assert never(steps, is_fall)
     assert never(steps, is_immobile)
     assert never(steps, lambda s: s.fall_rule)
 
 
-def test_bending_reads_horizontal_but_has_no_rapid_transition(fake_clock: FakeClock) -> None:
+def test_bending_has_a_horizontal_torso_on_upright_legs_and_no_rapid_transition(
+    fake_clock: FakeClock,
+) -> None:
     steps = run_sequence([Segment("standing", 3.0), Segment("bending", 4.0)], fake_clock)
     bend = first_pose(steps, "bending")
     bending = [s.signals for s in steps if s.index >= bend + 2]
-    assert all(s.horizontal for s in bending)
+    # The torso is as far from vertical as a lying person's and the head is down at hip height...
+    assert all((s.features.torso_angle_deg or 0.0) >= 60.0 for s in bending)
     assert all(s.head_hip_ok or s.horizontal_s < 1.0 for s in bending)
+    # ...but the legs carry the person, so this is a bend and never a horizontal posture.
+    assert all(s.legs_upright for s in bending)
+    assert all((s.features.leg_angle_deg or 90.0) <= 35.0 for s in bending)
+    assert not any(s.signals.horizontal for s in steps)
     assert not any(s.rapid_transition for s in bending)
     # The hips did not drop although the box got 30 % shorter.
     velocities = [s.features.hip_velocity for s in bending if s.features.hip_velocity is not None]
@@ -1040,10 +1280,29 @@ def test_bending_reads_horizontal_but_has_no_rapid_transition(fake_clock: FakeCl
     assert max(abs(v) for v in velocities) < 0.2
 
 
+@pytest.mark.parametrize("with_keypoints", [True, False])
+@pytest.mark.parametrize("pose", ["bending", "kneeling", "sitting"])
+def test_holding_a_bend_kneel_or_seat_still_never_becomes_immobile(
+    fake_clock: FakeClock, pose: str, with_keypoints: bool
+) -> None:
+    # Longer than immobile_sec without moving: only the posture keeps these from triggering.
+    steps = run_sequence(
+        [Segment("standing", 3.0), Segment(pose, 40.0)], fake_clock, keypoints=with_keypoints
+    )
+    assert never(steps, lambda s: s.horizontal)
+    assert never(steps, is_immobile)
+    assert never(steps, is_fall)
+    assert max(s.signals.immobile_elapsed_s for s in steps) == 0.0
+
+
 def test_sitting_and_kneeling_fail_the_head_hip_guard(fake_clock: FakeClock) -> None:
     for pose in ("sitting", "kneeling"):
         steps = run_sequence([Segment(pose, 3.0)], FakeClock(start_mono=fake_clock.monotonic()))
-        gaps = [s.signals.features.head_hip_gap for s in steps if s.signals.features.head_hip_gap is not None]
+        gaps = [
+            s.signals.features.head_hip_gap
+            for s in steps
+            if s.signals.features.head_hip_gap is not None
+        ]
         assert gaps
         assert min(gaps) > 0.25
         assert not any(s.signals.head_hip_ok for s in steps)
@@ -1062,7 +1321,9 @@ def test_lying_still_for_thirty_seconds_is_immobile_exactly_then(fake_clock: Fak
 
 
 def test_immobile_sec_is_configurable(fake_clock: FakeClock) -> None:
-    steps = run_sequence([Segment("lying", 15.0)], fake_clock, detector=FallDetector(immobile_sec=10.0, fps_hint=FPS))
+    steps = run_sequence(
+        [Segment("lying", 15.0)], fake_clock, detector=FallDetector(immobile_sec=10.0, fps_hint=FPS)
+    )
     detected = first(steps, is_immobile)
     assert detected is not None
     assert abs(detected - frames(10.0)) <= 1
@@ -1082,14 +1343,19 @@ def test_fall_then_lying_still_is_also_immobile(fake_clock: FakeClock) -> None:
 @pytest.mark.parametrize("with_keypoints", [True, False])
 def test_lying_but_moving_is_never_immobile(fake_clock: FakeClock, with_keypoints: bool) -> None:
     # Crawling 20 % of the frame width in 40 s: 0.5 % per second, 2 % every 4 s.
-    steps = run_sequence([Segment("lying", 40.0, feet=(0.3, 0.85), feet_to=(0.5, 0.85))], fake_clock, keypoints=with_keypoints)
+    steps = run_sequence(
+        [Segment("lying", 40.0, feet=(0.3, 0.85), feet_to=(0.5, 0.85))],
+        fake_clock,
+        keypoints=with_keypoints,
+    )
     assert never(steps, is_immobile)
     assert max(s.signals.immobile_elapsed_s for s in steps) < 5.0
 
 
 def test_immobile_clears_when_the_person_moves_two_percent(fake_clock: FakeClock) -> None:
     steps = run_sequence(
-        [Segment("lying", 31.0), Segment("lying", 2.0, feet=(0.5, 0.85), feet_to=(0.6, 0.85))], fake_clock
+        [Segment("lying", 31.0), Segment("lying", 2.0, feet=(0.5, 0.85), feet_to=(0.6, 0.85))],
+        fake_clock,
     )
     start_moving = 31 * 12
     assert steps[start_moving - 1].signals.immobile_condition
@@ -1102,21 +1368,76 @@ def test_immobile_clears_when_the_person_moves_two_percent(fake_clock: FakeClock
     assert all(s.signals.immobile_cleared for s in steps if s.index >= cleared)
 
 
+def test_immobile_clears_after_two_seconds_with_an_upright_torso(fake_clock: FakeClock) -> None:
+    # The keypoints sit up inside the unchanged lying box: the centroid stays where the stillness
+    # began, so only the posture clause of D-030 (not horizontal for 2 s) can clear.
+    steps = run_sequence(
+        [Segment("lying", 31.0), Segment("lying", 4.0, kp_pose="sitting")], fake_clock
+    )
+    sit = frames(31.0)
+    assert steps[sit - 1].signals.immobile_condition
+    assert not steps[sit - 1].signals.immobile_cleared
+    assert not steps[sit].signals.horizontal
+    assert steps[sit].signals.features.centroid == steps[sit - 1].signals.features.centroid
+    cleared = first(steps, lambda s: s.immobile_cleared, start=sit)
+    assert cleared is not None
+    assert abs(cleared - (sit + frames(2.0))) <= 1
+    assert all(s.signals.immobile_cleared for s in steps if s.index >= cleared)
+    assert all(not s.signals.immobile_condition for s in steps if s.index >= sit)
+
+
+def test_immobile_clears_after_two_seconds_with_a_box_that_is_no_longer_wide(
+    fake_clock: FakeClock,
+) -> None:
+    # Without keypoints: the box turns square around the same centre (aspect 1.0 < 1.3).
+    lying = box_to_px(
+        box_for_pose(
+            "lying", (0.5, 0.85), person_height_px=HEIGHT_PX, frame_w=FRAME_W, frame_h=FRAME_H
+        ),
+        FRAME_W,
+        FRAME_H,
+    )
+    cx, cy = lying[0] + lying[2] / 2.0, lying[1] + lying[3] / 2.0
+    square: PxBox = (cx - 75.0, cy - 75.0, 150.0, 150.0)
+    signals = run_boxes([lying] * frames(31.0) + [square] * frames(4.0), fake_clock)
+    sit = frames(31.0)
+    assert signals[sit - 1].immobile_condition
+    assert not signals[sit].horizontal
+    cleared = next(i for i, s in enumerate(signals) if i >= sit and s.immobile_cleared)
+    assert abs(cleared - (sit + frames(2.0))) <= 1
+    assert all(s.immobile_cleared for s in signals[cleared:])
+    assert not any(s.immobile_condition for s in signals[sit:])
+
+
 @pytest.mark.parametrize("with_keypoints", [True, False])
-def test_immobile_clears_after_two_seconds_not_horizontal(fake_clock: FakeClock, with_keypoints: bool) -> None:
-    steps = run_sequence([Segment("lying", 31.0), Segment("standing", 4.0)], fake_clock, keypoints=with_keypoints)
+def test_standing_up_clears_immobile_at_once_because_the_centroid_moves(
+    fake_clock: FakeClock, with_keypoints: bool
+) -> None:
+    steps = run_sequence(
+        [Segment("lying", 31.0), Segment("standing", 4.0)], fake_clock, keypoints=with_keypoints
+    )
     stand = first_pose(steps, "standing")
     assert steps[stand - 1].signals.immobile_condition
-    cleared = first(steps, lambda s: s.immobile_cleared, start=stand)
-    assert cleared is not None
-    assert abs(cleared - (stand + frames(2.0))) <= 1
+    assert not steps[stand - 1].signals.immobile_cleared
+    # D-030: getting up lifts the box centre by about half the standing height, far more than
+    # 2 % of the frame width, so the displacement clause clears on the first standing frame.
+    lifted = math.dist(
+        steps[stand].signals.features.centroid, steps[stand - 1].signals.features.centroid
+    )
+    assert lifted >= 0.02 * FRAME_W
+    assert steps[stand].signals.immobile_cleared
+    assert all(s.signals.immobile_cleared for s in steps if s.index >= stand)
     assert all(not s.signals.immobile_condition for s in steps if s.index >= stand)
 
 
 @pytest.mark.parametrize("with_keypoints", [True, False])
 def test_small_persons_never_trigger(fake_clock: FakeClock, with_keypoints: bool) -> None:
     steps = run_sequence(
-        [Segment("standing", 4.0, height_px=60.0), Segment("falling", 0.25, height_px=60.0), Segment("lying", 35.0, height_px=60.0)],
+        [
+            Segment("standing", 4.0, height_px=60.0),
+            Segment("falling", 0.25, height_px=60.0),
+            Segment("lying", 35.0, height_px=60.0),
+        ],
         fake_clock,
         keypoints=with_keypoints,
     )
@@ -1128,7 +1449,11 @@ def test_small_persons_never_trigger(fake_clock: FakeClock, with_keypoints: bool
 def test_a_lying_person_is_eligible_by_body_length(fake_clock: FakeClock) -> None:
     # Standing 150 px tall: the lying box is only ~44 px high but ~173 px long.
     steps = run_sequence(
-        [Segment("standing", 4.0, height_px=150.0), Segment("falling", 0.25, height_px=150.0), Segment("lying", 4.0, height_px=150.0)],
+        [
+            Segment("standing", 4.0, height_px=150.0),
+            Segment("falling", 0.25, height_px=150.0),
+            Segment("lying", 4.0, height_px=150.0),
+        ],
         fake_clock,
     )
     landing = first_pose(steps, "lying")
@@ -1170,7 +1495,15 @@ def test_a_single_frame_glitch_never_triggers(fake_clock: FakeClock, with_keypoi
 def test_a_glitch_while_lying_does_not_reset_the_counts(fake_clock: FakeClock) -> None:
     glitch = Segment("lying", DT, kp_pose="standing")
     steps = run_sequence(
-        [*FALL[:2], Segment("lying", 1.0), glitch, Segment("lying", 14.0), glitch, Segment("lying", 20.0)], fake_clock
+        [
+            *FALL[:2],
+            Segment("lying", 1.0),
+            glitch,
+            Segment("lying", 14.0),
+            glitch,
+            Segment("lying", 20.0),
+        ],
+        fake_clock,
     )
     landing = first_pose(steps, "lying")
     glitch_frames = [s for s in steps if not s.signals.horizontal and s.index > landing]
@@ -1186,7 +1519,8 @@ def test_a_glitch_while_lying_does_not_reset_the_counts(fake_clock: FakeClock) -
 
 def test_an_observation_gap_restarts_the_stillness(fake_clock: FakeClock) -> None:
     steps = run_sequence(
-        [Segment("lying", 20.0), Segment("lying", 2.0, observed=False), Segment("lying", 35.0)], fake_clock
+        [Segment("lying", 20.0), Segment("lying", 2.0, observed=False), Segment("lying", 35.0)],
+        fake_clock,
     )
     resumed = 22 * 12
     detected = first(steps, is_immobile)
@@ -1196,19 +1530,27 @@ def test_an_observation_gap_restarts_the_stillness(fake_clock: FakeClock) -> Non
 
 def test_a_short_detection_dropout_is_bridged(fake_clock: FakeClock) -> None:
     steps = run_sequence(
-        [Segment("lying", 20.0), Segment("lying", 0.5, observed=False), Segment("lying", 15.0)], fake_clock
+        [Segment("lying", 20.0), Segment("lying", 0.5, observed=False), Segment("lying", 15.0)],
+        fake_clock,
     )
     detected = first(steps, is_immobile)
     assert detected is not None
     assert abs(detected - frames(30.0)) <= 1
 
 
-def test_head_far_from_the_hips_blocks_the_fall(fake_clock: FakeClock) -> None:
-    def raise_head(kp: Keypoints, box: BBox) -> Keypoints:
-        lift = 0.6 * box[3]
-        xy = tuple((x, y - lift) if i in (KP_NOSE, KP_LEFT_EYE, KP_RIGHT_EYE, KP_LEFT_EAR, KP_RIGHT_EAR) else (x, y) for i, (x, y) in enumerate(kp.xy))
-        return Keypoints(xy=xy, conf=kp.conf)
+def raise_head(kp: Keypoints, box: BBox) -> Keypoints:
+    """Move the face keypoints up by 0.6 box heights (the head far above the hips)."""
+    lift = 0.6 * box[3]
+    xy = tuple(
+        (x, y - lift)
+        if i in (KP_NOSE, KP_LEFT_EYE, KP_RIGHT_EYE, KP_LEFT_EAR, KP_RIGHT_EAR)
+        else (x, y)
+        for i, (x, y) in enumerate(kp.xy)
+    )
+    return Keypoints(xy=xy, conf=kp.conf)
 
+
+def test_head_far_from_the_hips_blocks_the_fall(fake_clock: FakeClock) -> None:
     steps = run_sequence([*FALL[:2], Segment("lying", 8.0, kp_transform=raise_head)], fake_clock)
     landing = first_pose(steps, "lying")
     assert all(s.signals.horizontal for s in steps if s.index >= landing)
@@ -1216,9 +1558,26 @@ def test_head_far_from_the_hips_blocks_the_fall(fake_clock: FakeClock) -> None:
     assert never(steps, lambda s: s.head_hip_ok)
 
 
+def test_head_far_from_the_hips_blocks_immobility_too(fake_clock: FakeClock) -> None:
+    # The spec 5.9 guards protect both events: horizontal and still for 35 s is not enough.
+    steps = run_sequence([Segment("lying", 35.0, kp_transform=raise_head)], fake_clock)
+    assert all(s.signals.horizontal for s in steps)
+    assert max(s.signals.immobile_elapsed_s for s in steps) >= 30.0
+    assert never(steps, is_immobile)
+    # The same scene with the head down on the floor becomes immobile after 30 s.
+    plain = run_sequence([Segment("lying", 35.0)], FakeClock(start_mono=5000.0))
+    detected = first(plain, is_immobile)
+    assert detected is not None
+    assert abs(detected - frames(30.0)) <= 1
+
+
 def test_lying_down_slowly_is_not_a_fall_but_becomes_immobile(fake_clock: FakeClock) -> None:
     steps = run_sequence(
-        [Segment("sitting", 3.0), Segment("lying", 5.0, morph_from="sitting"), Segment("lying", 40.0)],
+        [
+            Segment("sitting", 3.0),
+            Segment("lying", 5.0, morph_from="sitting"),
+            Segment("lying", 40.0),
+        ],
         fake_clock,
         keypoints=False,
     )
@@ -1232,7 +1591,9 @@ def _box(aspect: float, height: float = 100.0, top: float = 300.0) -> PxBox:
 
 
 @pytest.mark.parametrize(("delay_s", "armed"), [(1.0, True), (1.5, True), (2.0, False)])
-def test_horizontal_must_begin_soon_after_the_transition(fake_clock: FakeClock, delay_s: float, armed: bool) -> None:
+def test_horizontal_must_begin_soon_after_the_transition(
+    fake_clock: FakeClock, delay_s: float, armed: bool
+) -> None:
     # Upright, then an aspect jump to 1.25 (rapid, not yet horizontal), then horizontal later.
     boxes = [_box(0.4)] * 24 + [_box(1.25)] * frames(delay_s) + [_box(1.35)] * 36
     signals = run_boxes(boxes, fake_clock)
@@ -1241,8 +1602,32 @@ def test_horizontal_must_begin_soon_after_the_transition(fake_clock: FakeClock, 
     assert any(s.fall_condition for s in signals) is armed
 
 
+def test_an_aspect_jump_is_dated_by_the_frame_that_completes_it(fake_clock: FakeClock) -> None:
+    # 0.4 -> 1.1 -> 1.25: the jump completes on the 1.25 frame. The following frames still see
+    # the upright box in their 0.7 s look-back, but they do not move the transition time.
+    boxes = [_box(0.4)] * 24 + [_box(1.1)] + [_box(1.25)] * 12
+    signals = run_boxes(boxes, fake_clock)
+    completed = 25
+    assert not signals[24].rapid_transition
+    assert signals[completed].rapid_transition
+    assert all(
+        s.rapid_transition_mono == pytest.approx(signals[completed].mono)
+        for s in signals[completed:]
+    )
+    # Dipping to 1.2 (not below 0.8) and rising again within 0.7 s of the upright box is a
+    # second, later jump; once the upright box has left the look-back, rising again is not.
+    again = run_boxes([_box(0.4)] * 24 + [_box(1.25), _box(1.2), _box(1.25)], fake_clock)
+    assert again[26].rapid_transition_mono == pytest.approx(again[26].mono)
+    late = run_boxes(
+        [_box(0.4)] * 24 + [_box(1.25)] * 9 + [_box(1.2), _box(1.25)], FakeClock(start_mono=1.0)
+    )
+    assert late[-1].rapid_transition_mono == pytest.approx(late[24].mono)
+
+
 @pytest.mark.parametrize(("lag_frames", "armed"), [(3, True), (6, True), (8, False)])
-def test_a_transition_shortly_after_the_horizontal_start_also_arms(fake_clock: FakeClock, lag_frames: int, armed: bool) -> None:
+def test_a_transition_shortly_after_the_horizontal_start_also_arms(
+    fake_clock: FakeClock, lag_frames: int, armed: bool
+) -> None:
     # Horizontal first (no rapid change from aspect 1.0), then a sudden 40 px drop of the box.
     boxes = [_box(1.0)] * 24 + [_box(1.35)] * lag_frames + [_box(1.35, top=340.0)] * 40
     signals = run_boxes(boxes, fake_clock)
@@ -1257,7 +1642,9 @@ class Recorder(FixedModel):
 
 
 @pytest.mark.parametrize(("proba", "expected"), [(0.9, True), (0.5, True), (0.1, False)])
-def test_classifier_vote_gates_the_rule(fake_clock: FakeClock, proba: float, expected: bool) -> None:
+def test_classifier_vote_gates_the_rule(
+    fake_clock: FakeClock, proba: float, expected: bool
+) -> None:
     model = Recorder(proba)
     detector = FallDetector(fps_hint=FPS, classifier=FallClassifier(model))
     steps = run_sequence(FALL, fake_clock, detector=detector)

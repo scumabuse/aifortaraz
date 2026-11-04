@@ -27,8 +27,15 @@ Rule semantics (thresholds are :class:`FallConfig` fields, defaults from spec 5.
   ``torso_angle_deg`` is the angle between hip-centre -> shoulder-centre and the image vertical
   (0° upright, 90° horizontal), computed in pixels, defined only when both shoulders and both
   hips have confidence >= ``min_kp_conf``. When it is undefined the keypoints are *unreliable*.
-- ``horizontal``: torso >= 60°, or box aspect w/h >= 1.3 when the keypoints are unreliable.
-  ``upright``: torso <= 35°, or aspect < 0.8 when unreliable.
+- ``leg_angle_deg`` is the angle between hip-centre -> ankle-centre (the knee centre when no ankle
+  is reliable) and the *downward* vertical (0° legs straight down, 90° horizontal), defined when
+  the hips, the shoulders and an ankle or knee are reliable and the leg vector is at least
+  ``min_leg_ratio`` (0.5) times as long as the torso. The legs are *upright* when it is <= 35°:
+  the person stands on them.
+- ``horizontal``: torso >= 60° and the legs not upright, or box aspect w/h >= 1.3 when the
+  keypoints are unreliable. A horizontal torso on upright legs is a forward bend, not a lying
+  body, so a person bending (even motionless for minutes) never has a horizontal posture (the
+  spec 5.9 guards against bending). ``upright``: torso <= 35°, or aspect < 0.8 when unreliable.
 - ``hip_velocity`` in box-heights per second, downward positive: from the hip centre of the
   keypoint computed in this frame and an earlier keypoint sample (the latest one >= 0.25 s older,
   else the oldest one, never older than 0.7 s), divided by the mean box height of the two frames.
@@ -36,8 +43,11 @@ Rule semantics (thresholds are :class:`FallConfig` fields, defaults from spec 5.
   ``keypoint_max_age_s``, the box centre is used the same way. While keypoints are available but
   not fresh in this frame the velocity is unknown (a box centre moves down when a person merely
   bends, so it is not trusted when keypoints exist).
-- ``rapid transition``: hip velocity >= 1.0, or the aspect is > 1.2 now and was < 0.8 at some
-  frame of the last 0.7 s. The time of the latest one is remembered.
+- ``rapid transition`` (a *rapid frame*): hip velocity >= 1.0, or the aspect jump completes in
+  this frame: the aspect rises above 1.2 (the previous frame's aspect was at most 1.2) and was
+  < 0.8 at some frame of the last 0.7 s. The jump is dated by the frame that completes it, not by
+  the later frames whose 0.7 s look-back still contains the upright box, so the arming window
+  below is measured from the jump itself. The time of the latest rapid frame is remembered.
 - A horizontal streak is *armed* when a rapid transition was observed at most
   ``transition_before_s`` (1.5 s) before the streak began or at most ``transition_after_s``
   (0.5 s) after it began.
@@ -52,9 +62,10 @@ Rule semantics (thresholds are :class:`FallConfig` fields, defaults from spec 5.
   OR no classifier). The classifier votes once per armed streak on the 1.5 s window that ends
   ``classifier_delay_s`` (0.5 s) after the streak began, i.e. on the descent and the landing.
 - ``fall_cleared``: upright held >= 2.0 s.
-- ``immobile_condition``: eligible, horizontal, and the box centre stays within 2 % of the frame
-  width of where the stillness began for >= ``immobile_sec`` (whether or not a fall was seen).
-  Moving 2 % or more restarts the stillness at the new place.
+- ``immobile_condition``: eligible, horizontal, ``head_hip_ok`` (the spec 5.9 guards against
+  bending, kneeling and sitting apply to both events), and the box centre stays within 2 % of
+  the frame width of where the stillness began for >= ``immobile_sec`` (whether or not a fall
+  was seen). Moving 2 % or more restarts the stillness at the new place.
 - ``immobile_cleared`` (D-030): not horizontal held >= 2.0 s, or the box centre is 2 % of the
   frame width or more away from where the last confirmed stillness began.
 - Streaks ("held for") tolerate interruptions of up to ``glitch_tolerance_s`` (0.3 s) and are
@@ -79,14 +90,18 @@ from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
 from safety_ai.inference.types import (
+    KP_LEFT_ANKLE,
     KP_LEFT_EAR,
     KP_LEFT_EYE,
     KP_LEFT_HIP,
+    KP_LEFT_KNEE,
     KP_LEFT_SHOULDER,
     KP_NOSE,
+    KP_RIGHT_ANKLE,
     KP_RIGHT_EAR,
     KP_RIGHT_EYE,
     KP_RIGHT_HIP,
+    KP_RIGHT_KNEE,
     KP_RIGHT_SHOULDER,
     BBox,
     Keypoints,
@@ -109,6 +124,7 @@ __all__ = [
     "box_to_px",
     "head_point_px",
     "hip_center_px",
+    "leg_angle_deg",
     "shoulder_center_px",
     "torso_angle_deg",
     "window_feature_vector",
@@ -127,6 +143,8 @@ _MIN_BOX_PX: Final[float] = 1.0
 _FEATURE_CLIP: Final[float] = 10.0
 """Unbounded window features are clipped into [-10, 10]."""
 _HEAD_KEYPOINTS: Final[tuple[int, ...]] = (KP_LEFT_EYE, KP_RIGHT_EYE, KP_LEFT_EAR, KP_RIGHT_EAR)
+_ANKLE_KEYPOINTS: Final[tuple[int, ...]] = (KP_LEFT_ANKLE, KP_RIGHT_ANKLE)
+_KNEE_KEYPOINTS: Final[tuple[int, ...]] = (KP_LEFT_KNEE, KP_RIGHT_KNEE)
 
 FALL_FEATURE_VERSION: Final[int] = 1
 """Version of :data:`FALL_FEATURE_NAMES`; stored with a saved classifier and checked on load."""
@@ -272,10 +290,17 @@ def head_point_px(
     nose = _keypoint_px(keypoints, KP_NOSE, frame_w, frame_h, min_conf)
     if nose is not None:
         return nose
+    return _mean_point(keypoints, _HEAD_KEYPOINTS, (frame_w, frame_h), min_conf)
+
+
+def _mean_point(
+    keypoints: Keypoints, indices: Sequence[int], frame: tuple[int, int], min_conf: float
+) -> tuple[float, float] | None:
+    """Mean pixel position of the reliable keypoints among ``indices`` (None when none is)."""
     points = [
         point
-        for index in _HEAD_KEYPOINTS
-        if (point := _keypoint_px(keypoints, index, frame_w, frame_h, min_conf)) is not None
+        for index in indices
+        if (point := _keypoint_px(keypoints, index, frame[0], frame[1], min_conf)) is not None
     ]
     if not points:
         return None
@@ -283,6 +308,52 @@ def head_point_px(
         statistics.fmean(p[0] for p in points),
         statistics.fmean(p[1] for p in points),
     )
+
+
+def leg_angle_deg(
+    keypoints: Keypoints,
+    frame_w: int,
+    frame_h: int,
+    *,
+    min_conf: float = 0.3,
+    min_ratio: float = 0.5,
+) -> float | None:
+    """Return the leg angle in degrees from the *downward* vertical (0 straight down, 180 up).
+
+    The leg vector runs from the hip centre to the mean of the reliable ankles, or to the mean of
+    the reliable knees when no ankle is reliable; it is measured in pixels like the torso angle.
+    Legs within 35° of straight down carry the person (standing, bending, kneeling), legs near
+    90° lie along the floor.
+
+    Args:
+        keypoints: COCO-17 keypoints, normalized to the frame.
+        frame_w: frame width in pixels.
+        frame_h: frame height in pixels.
+        min_conf: minimum confidence of every keypoint used.
+        min_ratio: the leg vector must be at least this many torso lengths long; shorter vectors
+            (legs pointing at the camera) have no meaningful direction.
+
+    Returns:
+        The angle in [0, 180], or None unless both hips, both shoulders and an ankle or a knee
+        are reliable and the leg vector is long enough.
+    """
+    _check_frame(frame_w, frame_h)
+    hips = hip_center_px(keypoints, frame_w, frame_h, min_conf=min_conf)
+    shoulders = shoulder_center_px(keypoints, frame_w, frame_h, min_conf=min_conf)
+    if hips is None or shoulders is None:
+        return None
+    frame = (frame_w, frame_h)
+    feet = _mean_point(keypoints, _ANKLE_KEYPOINTS, frame, min_conf)
+    if feet is None:
+        feet = _mean_point(keypoints, _KNEE_KEYPOINTS, frame, min_conf)
+    if feet is None:
+        return None
+    torso = math.dist(hips, shoulders)
+    dx = feet[0] - hips[0]
+    dy = feet[1] - hips[1]
+    if torso < 1e-9 or math.hypot(dx, dy) < min_ratio * torso:
+        return None
+    return math.degrees(math.atan2(abs(dx), dy))
 
 
 class PoseGate:
@@ -411,6 +482,8 @@ class FallFeatures:
     """Mean confidence of the usable keypoints, None without usable keypoints."""
     keypoints_age_s: float | None
     """Age of the usable keypoints in seconds, None without usable keypoints."""
+    leg_angle_deg: float | None = None
+    """Leg angle from the downward vertical (:func:`leg_angle_deg`) of the usable keypoints."""
 
     @property
     def keypoints_reliable(self) -> bool:
@@ -433,6 +506,16 @@ class _KeypointSample:
     torso_angle_deg: float | None
     head: tuple[float, float] | None
     mean_conf: float
+    leg_angle_deg: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class _HipSample:
+    """The hip centre of one keypoint sample (only samples with reliable hips)."""
+
+    mono: float
+    box_h_px: float
+    hip: tuple[float, float]
 
 
 def _pick_reference(
@@ -468,10 +551,13 @@ class FallFeatureExtractor:
         velocity_max_dt_s: float = 0.7,
         history_s: float = 2.0,
         max_samples: int = 256,
+        min_leg_ratio: float = 0.5,
     ) -> None:
         """Create an extractor; raises ValueError for out-of-range parameters."""
         if not 0.0 <= min_kp_conf <= 1.0:
             raise ValueError(f"min_kp_conf must be within 0..1, got {min_kp_conf}")
+        if not (math.isfinite(min_leg_ratio) and min_leg_ratio > 0.0):
+            raise ValueError(f"min_leg_ratio must be positive, got {min_leg_ratio}")
         if not keypoint_max_age_s > 0.0:
             raise ValueError(f"keypoint_max_age_s must be positive, got {keypoint_max_age_s}")
         if not keypoint_max_height_ratio >= 1.0:
@@ -485,6 +571,7 @@ class FallFeatureExtractor:
         if max_samples < 2:
             raise ValueError(f"max_samples must be >= 2, got {max_samples}")
         self._min_conf = min_kp_conf
+        self._min_leg_ratio = min_leg_ratio
         self._max_age = keypoint_max_age_s
         self._max_height_ratio = keypoint_max_height_ratio
         self._span = velocity_span_s
@@ -505,6 +592,11 @@ class FallFeatureExtractor:
     def latest(self) -> FallFeatures | None:
         """Features of the latest frame (None before the first update)."""
         return self._features[-1] if self._features else None
+
+    @property
+    def previous(self) -> FallFeatures | None:
+        """Features of the frame before the latest one (None when it left the 2 s history)."""
+        return self._features[-2] if len(self._features) >= 2 else None
 
     def update(
         self,
@@ -589,6 +681,13 @@ class FallFeatureExtractor:
                 ),
                 head=head_point_px(keypoints, frame_w, frame_h, min_conf=self._min_conf),
                 mean_conf=conf,
+                leg_angle_deg=leg_angle_deg(
+                    keypoints,
+                    frame_w,
+                    frame_h,
+                    min_conf=self._min_conf,
+                    min_ratio=self._min_leg_ratio,
+                ),
             )
         )
         self._last_keypoints_mono = kp_mono
@@ -636,11 +735,14 @@ class FallFeatureExtractor:
             head_hip_gap=gap,
             pose_conf=sample.mean_conf if sample is not None else None,
             keypoints_age_s=now - sample.mono if sample is not None else None,
+            leg_angle_deg=sample.leg_angle_deg if sample is not None else None,
         )
 
     def _velocity(self, now: float, box: PxBox) -> tuple[float | None, VelocitySource | None]:
         """Downward hip velocity (box-heights/s) from keypoints, else from the box centre."""
-        hip_samples = [s for s in self._keypoints if s.hip is not None]
+        hip_samples = [
+            _HipSample(s.mono, s.box_h_px, s.hip) for s in self._keypoints if s.hip is not None
+        ]
         if any(now - s.mono <= self._max_age + _EPS for s in hip_samples):
             return self._keypoint_velocity(now, hip_samples)
         earlier = list(self._boxes)[:-1]
@@ -653,19 +755,17 @@ class FallFeatureExtractor:
         return (dy / (now - ref_t) / mean_h, "box")
 
     def _keypoint_velocity(
-        self, now: float, hip_samples: list[_KeypointSample]
+        self, now: float, hip_samples: list[_HipSample]
     ) -> tuple[float | None, VelocitySource | None]:
         """Velocity between the keypoints of this frame and an earlier keypoint sample."""
         latest = hip_samples[-1]
-        if abs(latest.mono - now) > 1e-9 or latest.hip is None:
+        if abs(latest.mono - now) > 1e-9:
             return (None, None)
         earlier = hip_samples[:-1]
         index = _pick_reference([s.mono for s in earlier], now, self._span, self._max_dt)
         if index is None:
             return (None, None)
         reference = earlier[index]
-        if reference.hip is None:
-            return (None, None)
         mean_h = max((latest.box_h_px + reference.box_h_px) / 2.0, _MIN_BOX_PX)
         dy = latest.hip[1] - reference.hip[1]
         return (dy / (now - reference.mono) / mean_h, "keypoints")
@@ -921,6 +1021,10 @@ class FallConfig:
     """Box aspect at or above which the posture is horizontal (unreliable keypoints)."""
     upright_aspect: float = 0.8
     """Box aspect below which the posture is upright (unreliable keypoints)."""
+    legs_upright_deg: float = 35.0
+    """Legs within this angle of the downward vertical carry the person: no horizontal posture."""
+    min_leg_ratio: float = 0.5
+    """The leg vector must be this many torso lengths long for its direction to count."""
     rapid_velocity: float = 1.0
     """Downward hip velocity (box-heights/s) that counts as a rapid transition."""
     aspect_from: float = 0.8
@@ -978,6 +1082,7 @@ class FallConfig:
             "velocity_span_s": self.velocity_span_s,
             "horizontal_aspect": self.horizontal_aspect,
             "upright_aspect": self.upright_aspect,
+            "min_leg_ratio": self.min_leg_ratio,
         }
         for name, value in positive.items():
             if not (math.isfinite(value) and value > 0.0):
@@ -1000,6 +1105,8 @@ class FallConfig:
             raise ValueError("FallConfig.min_kp_conf must be within 0..1")
         if not 0.0 <= self.upright_deg < self.horizontal_deg <= 180.0:
             raise ValueError("FallConfig needs 0 <= upright_deg < horizontal_deg <= 180")
+        if not 0.0 <= self.legs_upright_deg < 90.0:
+            raise ValueError("FallConfig.legs_upright_deg must be within [0, 90)")
         if self.upright_aspect > self.horizontal_aspect:
             raise ValueError("FallConfig.upright_aspect must not exceed horizontal_aspect")
         if not 0.0 < self.aspect_from < self.aspect_to:
@@ -1038,7 +1145,8 @@ class FallSignals:
     keypoints_reliable: bool
     """The posture came from the torso angle (else from the box aspect)."""
     horizontal: bool
-    """Posture of this frame: torso >= 60°, or aspect >= 1.3 with unreliable keypoints."""
+    """Posture of this frame: torso >= 60° on legs that are not upright, or aspect >= 1.3 with
+    unreliable keypoints."""
     upright: bool
     """Posture of this frame: torso <= 35°, or aspect < 0.8 with unreliable keypoints."""
     horizontal_s: float
@@ -1062,13 +1170,15 @@ class FallSignals:
     fall_cleared: bool
     """Upright has held for >= ``clear_s``."""
     immobile_condition: bool
-    """Horizontal and still (< 2 % of the frame width) for >= ``immobile_sec``."""
+    """Horizontal and still (< 2 % of the frame width) for >= ``immobile_sec``, guards held."""
     immobile_elapsed_s: float
     """How long the current stillness has lasted (0 without one)."""
     immobile_cleared: bool
     """D-030: not horizontal for >= ``clear_s``, or moved >= 2 % from the confirmed stillness."""
     pose_conf: float
     """Mean confidence of the latest keypoints received (0.0 when none): ``details.pose_conf``."""
+    legs_upright: bool = False
+    """The usable keypoints show legs that carry the person (a horizontal torso is a bend)."""
 
 
 @dataclass(slots=True)
@@ -1241,6 +1351,7 @@ class FallDetector:
             velocity_max_dt_s=cfg.velocity_max_dt_s,
             history_s=self._history_s,
             max_samples=self._max_samples,
+            min_leg_ratio=cfg.min_leg_ratio,
         )
 
         def streak() -> _Streak:
@@ -1297,7 +1408,7 @@ class FallDetector:
             state.still_anchor = None
         state.last_mono = now
         reliable = features.torso_angle_deg is not None
-        horizontal, upright = self._posture(features)
+        horizontal, upright, legs_upright = self._posture(features)
         if self._rapid(features, state.extractor):
             state.last_rapid_mono = now
         gap = features.head_hip_gap
@@ -1330,7 +1441,10 @@ class FallDetector:
         )
         elapsed = now - state.still_since if state.still_since is not None else 0.0
         immobile = (
-            horizontal and state.still_since is not None and elapsed >= self._immobile_sec - _EPS
+            horizontal
+            and head_hip_ok
+            and state.still_since is not None
+            and elapsed >= self._immobile_sec - _EPS
         )
         if immobile:
             state.confirmed_anchor = state.still_anchor
@@ -1368,29 +1482,44 @@ class FallDetector:
             immobile_elapsed_s=elapsed,
             immobile_cleared=immobile_cleared,
             pose_conf=pose_conf if pose_conf is not None else 0.0,
+            legs_upright=legs_upright,
         )
 
-    def _posture(self, features: FallFeatures) -> tuple[bool, bool]:
-        """``(horizontal, upright)`` of one frame: torso angle, else the box aspect."""
+    def _posture(self, features: FallFeatures) -> tuple[bool, bool, bool]:
+        """``(horizontal, upright, legs_upright)`` of one frame.
+
+        The torso angle decides when the keypoints are reliable (a horizontal torso on upright
+        legs is a forward bend, not a horizontal posture), else the box aspect.
+        """
         cfg = self._config
         torso = features.torso_angle_deg
-        if torso is not None:
-            return (torso >= cfg.horizontal_deg, torso <= cfg.upright_deg)
+        if torso is None:
+            return (
+                features.aspect >= cfg.horizontal_aspect,
+                features.aspect < cfg.upright_aspect,
+                False,
+            )
+        legs = features.leg_angle_deg
+        legs_upright = legs is not None and legs <= cfg.legs_upright_deg
         return (
-            features.aspect >= cfg.horizontal_aspect,
-            features.aspect < cfg.upright_aspect,
+            torso >= cfg.horizontal_deg and not legs_upright,
+            torso <= cfg.upright_deg,
+            legs_upright,
         )
 
     def _rapid(self, features: FallFeatures, extractor: FallFeatureExtractor) -> bool:
-        """Rapid transition in this frame: fast hip drop, or aspect jump within the window."""
+        """Rapid frame: a fast hip drop, or the aspect jump from < 0.8 to > 1.2 completes now."""
         cfg = self._config
         velocity = features.hip_velocity
         if velocity is not None and velocity >= cfg.rapid_velocity - _EPS:
             return True
-        if features.aspect > cfg.aspect_to:
-            lowest = extractor.min_aspect_since(features.mono - cfg.aspect_window_s)
-            return lowest is not None and lowest < cfg.aspect_from
-        return False
+        if features.aspect <= cfg.aspect_to:
+            return False
+        previous = extractor.previous
+        if previous is not None and previous.aspect > cfg.aspect_to:
+            return False
+        lowest = extractor.min_aspect_since(features.mono - cfg.aspect_window_s)
+        return lowest is not None and lowest < cfg.aspect_from
 
     def _update_arming(self, state: _TrackState) -> None:
         """Arm the current horizontal streak when a rapid transition is close to its start."""

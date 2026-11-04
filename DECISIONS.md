@@ -45,3 +45,11 @@ Decisions taken while integrating the website (`aifortaraz/safety-inspector`) an
 
 ## I-013 JSON Schema of serialized defaults
 - **Decision:** the AI's outgoing StrictModel sets `json_schema_serialization_defaults_required=True`: fields with defaults (e.g. `type: "detections"`) are always serialized, so the exported schema marks them required — the root schema-parity test (spec 8.1) compares exactly what is sent with what the website requires.
+
+## I-014 The live show switches cam-1 to the webcam with one line in the root .env
+- **Decision:** docs/DEMO_SCRIPT.md switches cam-1 to the webcam with `SAFETY_AI_CAMERAS__0__SOURCE=0` appended to the root `.env` (the AI loader's list-index override, checked with `load_settings`; `make restart-ai` re-reads `.env`), and falls back to the demo video by deleting that line. The commented `source: 0` variant of `safety-ai/configs/demo_integration.yaml` is documented as the equivalent in docs/INTEGRATION.md.
+- **Reason:** `make doctor` checks the files named as `cameras[].source` in the YAML and reports a FAIL for `source: 0`; the `.env` line keeps the committed YAML and the pre-flight table green.
+- **Rejected:** editing the YAML on stage (indentation mistakes under stress, a red doctor row).
+
+## I-015 The pre-flight checklist printed by make demo-preset is console-safe
+- **Decision:** the `## Pre-flight` section of docs/DEMO_SCRIPT.md (printed verbatim by `scripts/demo_preset.py`) uses only characters of the Windows ANSI code page cp1251 (no arrows), so printing it cannot fail with UnicodeEncodeError when the output is redirected.

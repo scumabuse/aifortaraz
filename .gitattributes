@@ -1,7 +1,0 @@
-* text=auto eol=lf
-*.jpg binary
-*.png binary
-*.mp4 binary
-*.pt binary
-*.joblib binary
-*.db binary

@@ -1,10 +1,8 @@
-# safety-ai
+# aifortaraz — Digital Safety Inspector (website)
 
-The AI module of the **Digital Safety Inspector** platform: a Python service that watches
-industrial camera streams and detects occupational-safety events in real time — PPE violations
-with zone-specific requirements, entry into forbidden zones, overcrowding, dangerous
-person–vehicle proximity, falls and persons lying motionless. It reports to the website backend
-through the fixed integration contract in [docs/CONTRACT.md](docs/CONTRACT.md).
+The website (FastAPI backend + React/Vite frontend) lives in [safety-inspector/](safety-inspector/README.md).
 
-The full documentation (installation, running, demo, training, architecture) is written in
-milestone M6; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
+The AI module (`safety-ai`) is a separate repository. An older copy of it that used to sit at the top level of this
+repository was moved to the integration root's `_archive/aifortaraz_ai_copy_2026-11-04/` (see the integration
+root `DECISIONS.md`, I-001). The integration contract shared by both halves is
+[safety-inspector/docs/CONTRACT.md](safety-inspector/docs/CONTRACT.md) once Phase B of the integration lands.

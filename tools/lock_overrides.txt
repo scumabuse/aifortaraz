@@ -1,8 +1,0 @@
-# Overrides for `make lock` (uv pip compile -> requirements.lock, the CPU Docker image:
-# linux x86_64, Python 3.11).
-#
-# ultralytics depends on the GUI build `opencv-python`; the service and the image use
-# `opencv-python-headless` only (spec 9, DECISIONS.md D-021). Overriding the requirement with a
-# marker that never matches removes it from the resolution, so the lock pins only the headless
-# build and `pip install --no-deps -r requirements.lock` never installs the GUI wheel.
-opencv-python ; sys_platform == "never"

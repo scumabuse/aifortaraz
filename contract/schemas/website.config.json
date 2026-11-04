@@ -1,0 +1,310 @@
+{
+  "$defs": {
+    "ConfigCamera": {
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "stream_url": {
+          "title": "Stream Url",
+          "type": "string"
+        },
+        "stream_type": {
+          "title": "Stream Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "stream_url",
+        "stream_type"
+      ],
+      "title": "ConfigCamera",
+      "type": "object"
+    },
+    "ContractRules": {
+      "additionalProperties": false,
+      "properties": {
+        "required_ppe": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Required Ppe",
+          "type": "array"
+        },
+        "entry_forbidden": {
+          "default": false,
+          "title": "Entry Forbidden",
+          "type": "boolean"
+        },
+        "max_persons": {
+          "anyOf": [
+            {
+              "maximum": 10000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Persons"
+        },
+        "min_vehicle_distance_m": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 1000,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Vehicle Distance M"
+        },
+        "schedule": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ContractScheduleEntry"
+              },
+              "maxItems": 30,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schedule"
+        },
+        "confirm_frames": {
+          "anyOf": [
+            {
+              "maximum": 10000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confirm Frames"
+        },
+        "cooldown_sec": {
+          "anyOf": [
+            {
+              "maximum": 86400,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cooldown Sec"
+        },
+        "severity_override": {
+          "anyOf": [
+            {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "critical"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Severity Override"
+        }
+      },
+      "title": "ContractRules",
+      "type": "object"
+    },
+    "ContractScheduleEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "days": {
+          "items": {
+            "maximum": 7,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxItems": 7,
+          "minItems": 1,
+          "title": "Days",
+          "type": "array"
+        },
+        "from": {
+          "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
+          "title": "From",
+          "type": "string"
+        },
+        "to": {
+          "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
+          "title": "To",
+          "type": "string"
+        }
+      },
+      "required": [
+        "days",
+        "from",
+        "to"
+      ],
+      "title": "ContractScheduleEntry",
+      "type": "object"
+    },
+    "ContractZone": {
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "polygon": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "maximum": 1,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "maximum": 1,
+                "minimum": 0,
+                "type": "number"
+              }
+            ],
+            "type": "array"
+          },
+          "title": "Polygon",
+          "type": "array"
+        },
+        "rules": {
+          "$ref": "#/$defs/ContractRules"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "type",
+        "polygon",
+        "rules"
+      ],
+      "title": "ContractZone",
+      "type": "object"
+    },
+    "Thresholds": {
+      "additionalProperties": false,
+      "properties": {
+        "confirm_frames": {
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Confirm Frames",
+          "type": "integer"
+        },
+        "cooldown_sec": {
+          "maximum": 86400,
+          "minimum": 0,
+          "title": "Cooldown Sec",
+          "type": "integer"
+        },
+        "min_confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Min Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "confirm_frames",
+        "cooldown_sec",
+        "min_confidence"
+      ],
+      "title": "Thresholds",
+      "type": "object"
+    }
+  },
+  "description": "GET /api/v1/ingest/config[/{camera_id}]: exactly the structure of contract 4.4.",
+  "properties": {
+    "camera": {
+      "$ref": "#/$defs/ConfigCamera"
+    },
+    "frame_size_hint": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "integer"
+        }
+      ],
+      "title": "Frame Size Hint",
+      "type": "array"
+    },
+    "thresholds": {
+      "$ref": "#/$defs/Thresholds"
+    },
+    "ppe_types": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Ppe Types",
+      "type": "array"
+    },
+    "zones": {
+      "items": {
+        "$ref": "#/$defs/ContractZone"
+      },
+      "title": "Zones",
+      "type": "array"
+    },
+    "version": {
+      "title": "Version",
+      "type": "integer"
+    },
+    "updated_at": {
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "camera",
+    "frame_size_hint",
+    "thresholds",
+    "ppe_types",
+    "zones",
+    "version",
+    "updated_at"
+  ],
+  "title": "IngestConfig",
+  "type": "object"
+}

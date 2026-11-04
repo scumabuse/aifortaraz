@@ -1,0 +1,57 @@
+# Digital Safety Inspector: website backend + website frontend + AI module (integration spec 7.6).
+#   make up      (docker compose -p inspector up -d --build)
+# Website http://localhost:8080 (admin/admin) · AI video http://localhost:8001/stream/cam-1.mjpeg ·
+# AI health http://localhost:9100/health. All three read the root .env (`make init` creates it).
+# Inside compose the AI talks to the backend at http://backend:8000; the browser loads MJPEG from
+# localhost:8001 through the port mapping (contract 4.7).
+services:
+  backend:
+    build: ./aifortaraz/safety-inspector/backend
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite:///./data/inspector.db
+      DATA_DIR: ./data
+    volumes:
+      - ./aifortaraz/safety-inspector/data:/app/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  frontend:
+    build: ./aifortaraz/safety-inspector/frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  ai:
+    build:
+      context: ./safety-ai
+      dockerfile: docker/Dockerfile.cpu
+    env_file: .env
+    environment:
+      SAFETY_AI_BACKEND_URL: http://backend:8000
+      SAFETY_AI_OUTPUT__EXPOSE: "true"
+    command: ["run", "--config", "configs/demo_integration.yaml"]
+    volumes:
+      - ./safety-ai/models:/app/models
+      - ./safety-ai/data:/app/data
+      - ./safety-ai/events:/app/events
+    ports:
+      - "8001:8001"
+      - "9100:9100"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 120s

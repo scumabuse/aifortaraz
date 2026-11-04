@@ -1,0 +1,398 @@
+{
+  "$defs": {
+    "CameraInfo": {
+      "description": "The ``camera`` object of a config response.",
+      "properties": {
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "stream_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stream Url"
+        },
+        "stream_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stream Type"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "CameraInfo",
+      "type": "object"
+    },
+    "ScheduleWindow": {
+      "description": "A schedule entry: active on ``days`` (1 = Monday ... 7 = Sunday) from ``from`` to ``to``.\n\nTimes are the camera's local time. A window whose ``to`` is earlier than ``from`` runs past\nmidnight and belongs to the day it starts on.",
+      "properties": {
+        "days": {
+          "items": {
+            "maximum": 7,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "minItems": 1,
+          "title": "Days",
+          "type": "array"
+        },
+        "from": {
+          "title": "From",
+          "type": "string"
+        },
+        "to": {
+          "title": "To",
+          "type": "string"
+        }
+      },
+      "required": [
+        "days",
+        "from",
+        "to"
+      ],
+      "title": "ScheduleWindow",
+      "type": "object"
+    },
+    "Thresholds": {
+      "description": "Camera-level thresholds; null values fall back to the local configuration.",
+      "properties": {
+        "confirm_frames": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confirm Frames"
+        },
+        "cooldown_sec": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cooldown Sec"
+        },
+        "min_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Confidence"
+        }
+      },
+      "title": "Thresholds",
+      "type": "object"
+    },
+    "Zone": {
+      "description": "A zone polygon (normalized to the frame) with its rules; ``type`` is only a UI hint.",
+      "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "default": "ppe",
+          "title": "Type",
+          "type": "string"
+        },
+        "polygon": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "type": "array"
+          },
+          "minItems": 3,
+          "title": "Polygon",
+          "type": "array"
+        },
+        "rules": {
+          "$ref": "#/$defs/ZoneRules"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "polygon"
+      ],
+      "title": "Zone",
+      "type": "object"
+    },
+    "ZoneRules": {
+      "description": "Rule fields of a zone; every non-null field is applied (contract 4.4).",
+      "properties": {
+        "required_ppe": {
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "helmet",
+                  "vest",
+                  "glasses",
+                  "gloves",
+                  "mask",
+                  "boots",
+                  "earmuffs",
+                  "harness",
+                  "face_shield"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Required Ppe"
+        },
+        "entry_forbidden": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Entry Forbidden"
+        },
+        "max_persons": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Persons"
+        },
+        "min_vehicle_distance_m": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Vehicle Distance M"
+        },
+        "schedule": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ScheduleWindow"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schedule"
+        },
+        "confirm_frames": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confirm Frames"
+        },
+        "cooldown_sec": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cooldown Sec"
+        },
+        "severity_override": {
+          "anyOf": [
+            {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "critical"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Severity Override"
+        }
+      },
+      "title": "ZoneRules",
+      "type": "object"
+    }
+  },
+  "description": "Response of ``GET /api/v1/ingest/config/{camera_id}`` (one element of the list endpoint).",
+  "properties": {
+    "camera": {
+      "$ref": "#/$defs/CameraInfo"
+    },
+    "frame_size_hint": {
+      "anyOf": [
+        {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          ],
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Frame Size Hint"
+    },
+    "thresholds": {
+      "$ref": "#/$defs/Thresholds"
+    },
+    "ppe_types": {
+      "items": {
+        "enum": [
+          "helmet",
+          "vest",
+          "glasses",
+          "gloves",
+          "mask",
+          "boots",
+          "earmuffs",
+          "harness",
+          "face_shield"
+        ],
+        "type": "string"
+      },
+      "title": "Ppe Types",
+      "type": "array"
+    },
+    "zones": {
+      "items": {
+        "$ref": "#/$defs/Zone"
+      },
+      "title": "Zones",
+      "type": "array"
+    },
+    "version": {
+      "default": 0,
+      "title": "Version",
+      "type": "integer"
+    },
+    "updated_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Updated At"
+    }
+  },
+  "required": [
+    "camera"
+  ],
+  "title": "CameraConfig",
+  "type": "object"
+}

@@ -1,0 +1,15 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "ended_at": {
+      "format": "date-time",
+      "title": "Ended At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "ended_at"
+  ],
+  "title": "EndEvent",
+  "type": "object"
+}

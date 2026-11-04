@@ -23,3 +23,25 @@ Decisions taken while integrating the website (`aifortaraz/safety-inspector`) an
 
 ## I-006 No pushes to GitHub
 - **Decision:** `safety-ai/` and `aifortaraz/` both have `origin = github.com/scumabuse/aifortaraz` with diverged histories; the integration spec asks for local commits only, so nothing is pushed.
+
+## I-007 Website cameras and AI_CAMERAS
+- **Decision:** the website seeds cam-1…cam-4 with exactly these ids (Camera.id is a 36-char string, so the seed can set them; the API keeps generating UUIDs for new cameras). A new variable AI_CAMERAS (root .env: cam-1,cam-2) lists the cameras processed by the AI: they are seeded even with DEMO_MODE=false, as AI-enabled MJPEG cameras on `<AI_MJPEG_BASE_URL>/stream/<id>.mjpeg`, with central zones (cam-1 helmet + vest, cam-2 glasses + gloves). cam-3/cam-4 keep `ai_enabled=true` and their demo video so the website's mock generator keeps animating them (it only runs for AI-enabled cameras); the AI ignores configs of cameras it does not run.
+- **Rejected:** cam-3/cam-4 with ai_enabled=false (their mocks would stop, contrary to spec 7.5).
+
+## I-008 Server cooldown on event time
+- **Decision:** the website's 202 cooldown compares the events' `started_at` (event time), not server receive time, in both directions. After an outage the AI's spool delivers several events in a burst; a receive-time cooldown would wrongly suppress legitimate later events (root chaos test 8.2.10).
+
+## I-009 Schedule weekdays at the boundary
+- **Decision:** the website stores and edits weekdays 0..6 (Monday = 0); the ingest config converts them to the contract's 1..7 (Monday = 1). `scripts/demo_preset.py` converts back when it loads zone files through the zone API. The zone editor's own API is not part of the contract and keeps 0..6.
+
+## I-010 Snapshot problems are 422 with a field error
+- **Decision:** contract 4.8 ("malformed ingest input → 422 with field errors") wins over HTTP 413 for an oversized snapshot; only a whole request above 8 MB keeps 413 (an HTTP-level limit before parsing). aifortaraz commit after `2fbd88e`.
+
+## I-011 Heartbeat extra is free-form on both sides
+- **Decision:** the AI's HeartbeatExtra accepts any keys; `model_family` and `supported_ppe` are optional and left out of the JSON when unknown, so the contract's own 4.2 example validates against the AI model; the website stores `supported_ppe` per camera and shows unsupported items.
+
+## I-012 Severity is resolved by the website
+- **Decision:** the AI sends `severity: null` for every type (fall/immobile used to send "critical"); the website applies null → zone severity_override → type default (contract 4.1). safety-ai D-032.
+
+## I-013 JSON Schema of serialized defaults
+- **Decision:** the AI's outgoing StrictModel sets `json_schema_serialization_defaults_required=True`: fields with defaults (e.g. `type: "detections"`) are always serialized, so the exported schema marks them required — the root schema-parity test (spec 8.1) compares exactly what is sent with what the website requires.

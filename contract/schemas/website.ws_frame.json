@@ -1,0 +1,34 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "const": "frame",
+      "title": "Type",
+      "type": "string"
+    },
+    "camera_id": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Camera Id",
+      "type": "string"
+    },
+    "ts": {
+      "format": "date-time",
+      "title": "Ts",
+      "type": "string"
+    },
+    "jpeg_base64": {
+      "maxLength": 7000000,
+      "title": "Jpeg Base64",
+      "type": "string"
+    }
+  },
+  "required": [
+    "type",
+    "camera_id",
+    "ts",
+    "jpeg_base64"
+  ],
+  "title": "FrameIn",
+  "type": "object"
+}

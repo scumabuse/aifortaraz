@@ -1,0 +1,36 @@
+{
+  "additionalProperties": false,
+  "description": "``{\"type\": \"frame\", ...}`` — optional annotated JPEG (<= 10/s, <= 960 px, quality 70).",
+  "properties": {
+    "type": {
+      "const": "frame",
+      "default": "frame",
+      "title": "Type",
+      "type": "string"
+    },
+    "camera_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+      "title": "Camera Id",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    },
+    "jpeg_base64": {
+      "minLength": 8,
+      "title": "Jpeg Base64",
+      "type": "string"
+    }
+  },
+  "required": [
+    "type",
+    "camera_id",
+    "ts",
+    "jpeg_base64"
+  ],
+  "title": "FrameMessage",
+  "type": "object"
+}

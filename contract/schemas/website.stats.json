@@ -1,0 +1,72 @@
+{
+  "$defs": {
+    "PpeStat": {
+      "additionalProperties": false,
+      "properties": {
+        "checked": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Checked",
+          "type": "integer"
+        },
+        "compliant": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Compliant",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "checked",
+        "compliant"
+      ],
+      "title": "PpeStat",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "camera_id": {
+      "title": "Camera Id",
+      "type": "string"
+    },
+    "period_start": {
+      "format": "date-time",
+      "title": "Period Start",
+      "type": "string"
+    },
+    "period_end": {
+      "format": "date-time",
+      "title": "Period End",
+      "type": "string"
+    },
+    "persons_total": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "title": "Persons Total",
+      "type": "integer"
+    },
+    "persons_compliant": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "title": "Persons Compliant",
+      "type": "integer"
+    },
+    "by_ppe": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PpeStat"
+      },
+      "title": "By Ppe",
+      "type": "object"
+    }
+  },
+  "required": [
+    "camera_id",
+    "period_start",
+    "period_end",
+    "persons_total",
+    "persons_compliant"
+  ],
+  "title": "StatsIn",
+  "type": "object"
+}

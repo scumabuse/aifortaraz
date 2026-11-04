@@ -1,0 +1,530 @@
+{
+  "$defs": {
+    "Box": {
+      "additionalProperties": false,
+      "description": "One box in ``details.boxes``; PPE item boxes carry the owning person's track id.",
+      "properties": {
+        "track_id": {
+          "minimum": 0,
+          "title": "Track Id",
+          "type": "integer"
+        },
+        "label": {
+          "enum": [
+            "person",
+            "vehicle",
+            "forklift",
+            "truck",
+            "car",
+            "helmet",
+            "vest",
+            "glasses",
+            "gloves",
+            "mask",
+            "boots",
+            "earmuffs",
+            "harness",
+            "face_shield",
+            "head",
+            "face",
+            "hands",
+            "foot",
+            "ear"
+          ],
+          "title": "Label",
+          "type": "string"
+        },
+        "bbox": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Bbox",
+          "type": "array"
+        },
+        "conf": {
+          "title": "Conf",
+          "type": "number"
+        }
+      },
+      "required": [
+        "track_id",
+        "label",
+        "bbox",
+        "conf"
+      ],
+      "title": "Box",
+      "type": "object"
+    },
+    "CustomDetails": {
+      "additionalProperties": false,
+      "description": "``details`` of a ``custom`` event.",
+      "properties": {
+        "title": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "boxes": {
+          "items": {
+            "$ref": "#/$defs/Box"
+          },
+          "minItems": 1,
+          "title": "Boxes",
+          "type": "array"
+        },
+        "frame_size": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          ],
+          "title": "Frame Size",
+          "type": "array"
+        }
+      },
+      "required": [
+        "title",
+        "boxes",
+        "frame_size"
+      ],
+      "title": "CustomDetails",
+      "type": "object"
+    },
+    "FallDetectedDetails": {
+      "additionalProperties": false,
+      "description": "``details`` of a ``fall_detected`` event.",
+      "properties": {
+        "pose_conf": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Pose Conf",
+          "type": "number"
+        },
+        "boxes": {
+          "items": {
+            "$ref": "#/$defs/Box"
+          },
+          "minItems": 1,
+          "title": "Boxes",
+          "type": "array"
+        },
+        "frame_size": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          ],
+          "title": "Frame Size",
+          "type": "array"
+        }
+      },
+      "required": [
+        "pose_conf",
+        "boxes",
+        "frame_size"
+      ],
+      "title": "FallDetectedDetails",
+      "type": "object"
+    },
+    "OvercrowdingDetails": {
+      "additionalProperties": false,
+      "description": "``details`` of an ``overcrowding`` event.",
+      "properties": {
+        "count": {
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "max_persons": {
+          "minimum": 0,
+          "title": "Max Persons",
+          "type": "integer"
+        },
+        "boxes": {
+          "items": {
+            "$ref": "#/$defs/Box"
+          },
+          "minItems": 1,
+          "title": "Boxes",
+          "type": "array"
+        },
+        "frame_size": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          ],
+          "title": "Frame Size",
+          "type": "array"
+        }
+      },
+      "required": [
+        "count",
+        "max_persons",
+        "boxes",
+        "frame_size"
+      ],
+      "title": "OvercrowdingDetails",
+      "type": "object"
+    },
+    "PersonImmobileDetails": {
+      "additionalProperties": false,
+      "description": "``details`` of a ``person_immobile`` event.",
+      "properties": {
+        "immobile_sec": {
+          "minimum": 0.0,
+          "title": "Immobile Sec",
+          "type": "number"
+        },
+        "boxes": {
+          "items": {
+            "$ref": "#/$defs/Box"
+          },
+          "minItems": 1,
+          "title": "Boxes",
+          "type": "array"
+        },
+        "frame_size": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          ],
+          "title": "Frame Size",
+          "type": "array"
+        }
+      },
+      "required": [
+        "immobile_sec",
+        "boxes",
+        "frame_size"
+      ],
+      "title": "PersonImmobileDetails",
+      "type": "object"
+    },
+    "PpeViolationDetails": {
+      "additionalProperties": false,
+      "description": "``details`` of a ``ppe_violation`` event.",
+      "properties": {
+        "missing_ppe": {
+          "items": {
+            "enum": [
+              "helmet",
+              "vest",
+              "glasses",
+              "gloves",
+              "mask",
+              "boots",
+              "earmuffs",
+              "harness",
+              "face_shield"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Missing Ppe",
+          "type": "array"
+        },
+        "present_ppe": {
+          "items": {
+            "enum": [
+              "helmet",
+              "vest",
+              "glasses",
+              "gloves",
+              "mask",
+              "boots",
+              "earmuffs",
+              "harness",
+              "face_shield"
+            ],
+            "type": "string"
+          },
+          "title": "Present Ppe",
+          "type": "array"
+        },
+        "boxes": {
+          "items": {
+            "$ref": "#/$defs/Box"
+          },
+          "minItems": 1,
+          "title": "Boxes",
+          "type": "array"
+        },
+        "frame_size": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          ],
+          "title": "Frame Size",
+          "type": "array"
+        }
+      },
+      "required": [
+        "missing_ppe",
+        "present_ppe",
+        "boxes",
+        "frame_size"
+      ],
+      "title": "PpeViolationDetails",
+      "type": "object"
+    },
+    "VehicleProximityDetails": {
+      "additionalProperties": false,
+      "description": "``details`` of a ``vehicle_proximity`` event.",
+      "properties": {
+        "distance_m": {
+          "minimum": 0.0,
+          "title": "Distance M",
+          "type": "number"
+        },
+        "person_track_id": {
+          "minimum": 0,
+          "title": "Person Track Id",
+          "type": "integer"
+        },
+        "vehicle_track_id": {
+          "minimum": 0,
+          "title": "Vehicle Track Id",
+          "type": "integer"
+        },
+        "boxes": {
+          "items": {
+            "$ref": "#/$defs/Box"
+          },
+          "minItems": 2,
+          "title": "Boxes",
+          "type": "array"
+        },
+        "frame_size": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          ],
+          "title": "Frame Size",
+          "type": "array"
+        }
+      },
+      "required": [
+        "distance_m",
+        "person_track_id",
+        "vehicle_track_id",
+        "boxes",
+        "frame_size"
+      ],
+      "title": "VehicleProximityDetails",
+      "type": "object"
+    },
+    "ZoneIntrusionDetails": {
+      "additionalProperties": false,
+      "description": "``details`` of a ``zone_intrusion`` event.",
+      "properties": {
+        "duration_sec": {
+          "minimum": 0.0,
+          "title": "Duration Sec",
+          "type": "number"
+        },
+        "boxes": {
+          "items": {
+            "$ref": "#/$defs/Box"
+          },
+          "minItems": 1,
+          "title": "Boxes",
+          "type": "array"
+        },
+        "frame_size": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          ],
+          "title": "Frame Size",
+          "type": "array"
+        }
+      },
+      "required": [
+        "duration_sec",
+        "boxes",
+        "frame_size"
+      ],
+      "title": "ZoneIntrusionDetails",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Body of ``POST /api/v1/ingest/events`` (the ``payload`` form field, or the JSON body).",
+  "properties": {
+    "external_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "External Id",
+      "type": "string"
+    },
+    "camera_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+      "title": "Camera Id",
+      "type": "string"
+    },
+    "zone_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Zone Id"
+    },
+    "type": {
+      "enum": [
+        "ppe_violation",
+        "zone_intrusion",
+        "vehicle_proximity",
+        "fall_detected",
+        "person_immobile",
+        "overcrowding",
+        "custom"
+      ],
+      "title": "Type",
+      "type": "string"
+    },
+    "severity": {
+      "anyOf": [
+        {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Severity"
+    },
+    "confidence": {
+      "title": "Confidence",
+      "type": "number"
+    },
+    "track_id": {
+      "minimum": 0,
+      "title": "Track Id",
+      "type": "integer"
+    },
+    "started_at": {
+      "title": "Started At",
+      "type": "string"
+    },
+    "ended_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Ended At"
+    },
+    "details": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PpeViolationDetails"
+        },
+        {
+          "$ref": "#/$defs/ZoneIntrusionDetails"
+        },
+        {
+          "$ref": "#/$defs/VehicleProximityDetails"
+        },
+        {
+          "$ref": "#/$defs/FallDetectedDetails"
+        },
+        {
+          "$ref": "#/$defs/PersonImmobileDetails"
+        },
+        {
+          "$ref": "#/$defs/OvercrowdingDetails"
+        },
+        {
+          "$ref": "#/$defs/CustomDetails"
+        }
+      ],
+      "title": "Details"
+    }
+  },
+  "required": [
+    "external_id",
+    "camera_id",
+    "zone_id",
+    "type",
+    "severity",
+    "confidence",
+    "track_id",
+    "started_at",
+    "ended_at",
+    "details"
+  ],
+  "title": "EventPayload",
+  "type": "object"
+}

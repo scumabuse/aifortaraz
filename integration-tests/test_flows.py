@@ -100,10 +100,12 @@ def find_key(node: Any, key: str) -> Any:
     return None
 
 
-def configure(backend: Backend, zones: list[dict[str, Any]], *, confirm: int = 6, cooldown: int = 20) -> list[dict[str, Any]]:
-    """Thresholds + zones of cam-1, as an operator would set them in the website."""
+def configure(backend: Backend, zones: list[dict[str, Any]], *, confirm: int = 6, cooldown: int = 20,
+              keep_existing: bool = False) -> list[dict[str, Any]]:
+    """Thresholds + zones of cam-1, as an operator would set them in the website (``keep_existing``:
+    the seeded zones carry demo incidents, so they are disabled instead of deleted)."""
     set_thresholds(backend, confirm_frames=confirm, cooldown_sec=cooldown)
-    return set_zones(backend, "cam-1", zones)
+    return set_zones(backend, "cam-1", zones, keep_existing=keep_existing)
 
 
 # --------------------------------------------------------------------------------------------
@@ -305,10 +307,11 @@ def test_detections_reach_browser(backend_factory, ai_runner, live_factory) -> N
         o.get("track_id") == 1 and o.get("state") == "violation"
         for _, m in live.of("detections", camera_id="cam-1") for o in m.get("objects", [])),
         timeout=40, message="track 1 reaches state violation")
-    poll(lambda: [m for _, m in live.of("detections", camera_id="cam-1") if any(
-        o.get("track_id") == 1 and o.get("state") == "ok" for o in m.get("objects", []))
-        and any(o2.get("state") == "violation" for _, m2 in live.of("detections", camera_id="cam-1") for o2 in m2.get("objects", []))],
-        timeout=40, message="track 1 back to ok after the helmet is put on")
+    first_violation = next(at for at, m in live.of("detections", camera_id="cam-1")
+                           if any(o.get("track_id") == 1 and o.get("state") == "violation" for o in m.get("objects", [])))
+    poll(lambda: [m for _, m in live.of("detections", camera_id="cam-1", since=first_violation) if any(
+        o.get("track_id") == 1 and o.get("state") == "ok" for o in m.get("objects", []))],
+        timeout=40, message="track 1 back to ok after the helmet is put on (scenario: helmet on at 8 s)")
     time.sleep(3)
     messages = live.of("detections", camera_id="cam-1")
     assert len(messages) > 50, f"detections flowing: {len(messages)}"
@@ -360,7 +363,7 @@ def test_mjpeg_available(backend_factory, ai_runner, push_frames) -> None:
 
 def test_stats_to_kpi(backend_factory, ai_runner) -> None:
     backend = backend_factory(demo_mode=True, demo_autostart=True)
-    configure(backend, [zone("Zone A", {"required_ppe": ["helmet", "vest"]})])
+    configure(backend, [zone("Zone A", {"required_ppe": ["helmet", "vest"]})], keep_existing=True)
     ai_runner.start(backend, {"cam-1": "walkers_compliant"}, loop=True)
 
     def compliance() -> float | None:
@@ -381,7 +384,7 @@ def test_stats_to_kpi(backend_factory, ai_runner) -> None:
 
 def test_mock_switching(backend_factory, ai_runner, live_factory) -> None:
     backend = backend_factory(demo_mode=True, demo_autostart=True)
-    configure(backend, [zone("Zone A", {"required_ppe": ["helmet", "vest"]})])
+    configure(backend, [zone("Zone A", {"required_ppe": ["helmet", "vest"]})], keep_existing=True)
     live = live_factory(backend, ["cam-1", "cam-3"])
 
     def mock_detections(camera_id: str, since: float, until: float | None = None) -> list[Any]:

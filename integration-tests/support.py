@@ -224,11 +224,25 @@ class LiveSocket:
 # --------------------------------------------------------------------------------------------
 
 
-def set_zones(backend: Backend, camera_id: str, zones: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Replace a camera's zones through the website's zone API (the zone editor's save path)."""
-    response = backend.client.put(f"/api/v1/cameras/{camera_id}/zones", headers=backend.admin, json=zones)
+def set_zones(backend: Backend, camera_id: str, zones: list[dict[str, Any]], *,
+              keep_existing: bool = False) -> list[dict[str, Any]]:
+    """Save a camera's zones through the website's zone API (the zone editor's save path).
+
+    The save replaces the camera's zone list. The website refuses to delete a zone that already has
+    incidents (409, "disable it instead"), so with ``keep_existing`` the current zones are sent back
+    with their ids and ``enabled: false`` — what an operator does in the editor on a camera with
+    history (demo mode seeds incidents). Returns the saved versions of ``zones`` only.
+    """
+    body = list(zones)
+    if keep_existing:
+        current = backend.client.get(f"/api/v1/cameras/{camera_id}/zones", headers=backend.admin)
+        assert current.status_code == 200, f"zone list failed: {current.status_code} {current.text[:300]}"
+        for item in current.json():
+            kept = {key: value for key, value in item.items() if key not in ("camera_id", "updated_at")}
+            body.append({**kept, "enabled": False})
+    response = backend.client.put(f"/api/v1/cameras/{camera_id}/zones", headers=backend.admin, json=body)
     assert response.status_code == 200, f"zone save failed: {response.status_code} {response.text[:500]}"
-    return response.json()
+    return response.json()[: len(zones)]
 
 
 def zone(name: str, rules: dict[str, Any], *, polygon: list[list[float]] | None = None,

@@ -34,7 +34,7 @@ from .stage_two import (
     status_payload,
     supported_ppe,
 )
-from .storage import check_snapshot, decode_snapshot
+from .storage import check_snapshot, decode_snapshot, snapshot_error
 
 router = APIRouter(prefix="/api/v1/ingest", tags=["ingest"])
 logger = logging.getLogger("inspector")
@@ -85,7 +85,7 @@ async def parse_event(request: Request):
                         raise HTTPException(422, "snapshot должен быть файлом JPEG")
                     snapshot = await file.read(5 * 1024 * 1024 + 1)
                     if len(snapshot) > 5 * 1024 * 1024:
-                        raise HTTPException(413, "Размер снимка превышает 5 МБ")
+                        raise snapshot_error("Размер снимка превышает 5 МБ")
                 if isinstance(payload, dict) and "snapshot_base64" in payload:
                     raise HTTPException(
                         422, "В multipart передайте снимок файлом snapshot"

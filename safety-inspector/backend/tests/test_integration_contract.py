@@ -589,7 +589,14 @@ def test_snapshot_must_be_a_jpeg_by_signature(client, ctx):
         assert response.status_code == 422, response.text
         assert response.json()["error"]["code"] == "validation_error"
     oversized = b"\xff\xd8\xff" + bytes(5 * 1024 * 1024)
-    assert ctx.post(event(camera["id"]), oversized).status_code == 413
+    too_big = ctx.post(event(camera["id"]), oversized)
+    assert too_big.status_code == 422, too_big.text
+    assert too_big.json()["error"]["details"]["fields"] == [
+        {
+            "location": ["body", "snapshot_base64"],
+            "message": "Размер снимка превышает 5 МБ",
+        }
+    ]
     first = event(camera["id"])
     assert ctx.post(first, jpeg()).status_code == 201
     duplicate = {

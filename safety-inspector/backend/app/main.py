@@ -109,13 +109,18 @@ async def http_error(request: Request, exc: StarletteHTTPException):
         415: "unsupported_media_type",
         422: "validation_error",
     }
+    message, details = str(exc.detail), {}
+    if isinstance(exc.detail, dict):
+        # Field-level problems raised by hand (the snapshot) keep the contract error shape.
+        message = str(exc.detail.get("message", ""))
+        details = {"fields": exc.detail.get("fields", [])}
     return JSONResponse(
         status_code=exc.status_code,
         content={
             "error": {
                 "code": codes.get(exc.status_code, "http_error"),
-                "message": str(exc.detail),
-                "details": {},
+                "message": message,
+                "details": details,
             }
         },
         headers=exc.headers,

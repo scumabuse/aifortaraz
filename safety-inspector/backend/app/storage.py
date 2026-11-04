@@ -10,6 +10,19 @@ from PIL import Image, UnidentifiedImageError
 from .database import DATABASE_URL
 
 MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024
+
+
+def snapshot_error(message: str, field: str = "snapshot") -> HTTPException:
+    """A 422 naming the snapshot field (contract 4.8: malformed ingest input → 422 + field errors)."""
+    return HTTPException(
+        422,
+        detail={
+            "message": message,
+            "fields": [{"location": ["body", field], "message": message}],
+        },
+    )
+
+
 JPEG_MAGIC = b"\xff\xd8\xff"
 DATA_DIR = Path(
     os.getenv(
@@ -29,11 +42,13 @@ def decode_snapshot(encoded: str | None):
     if encoded.startswith("data:image/jpeg;base64,"):
         encoded = encoded.split(",", 1)[1]
     if len(encoded) > (MAX_SNAPSHOT_BYTES + 2) // 3 * 4:
-        raise HTTPException(413, "Размер снимка превышает 5 МБ")
+        raise snapshot_error("Размер снимка превышает 5 МБ", "snapshot_base64")
     try:
         raw = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError):
-        raise HTTPException(422, "Снимок должен быть корректной base64-строкой JPEG")
+        raise snapshot_error(
+            "Снимок должен быть корректной base64-строкой JPEG", "snapshot_base64"
+        )
     return raw
 
 
@@ -42,9 +57,9 @@ def check_snapshot(raw: bytes | None):
     if raw is None:
         return None
     if len(raw) > MAX_SNAPSHOT_BYTES:
-        raise HTTPException(413, "Размер снимка превышает 5 МБ")
+        raise snapshot_error("Размер снимка превышает 5 МБ")
     if not raw.startswith(JPEG_MAGIC):
-        raise HTTPException(422, "Снимок должен быть JPEG (сигнатура FF D8 FF)")
+        raise snapshot_error("Снимок должен быть JPEG (сигнатура FF D8 FF)")
     return raw
 
 
@@ -59,7 +74,7 @@ def save_snapshot(incident_id: str, raw: bytes | None):
     try:
         with Image.open(io.BytesIO(raw)) as image:
             if image.format != "JPEG" or image.width * image.height > 16_000_000:
-                raise HTTPException(422, "Требуется JPEG размером до 16 мегапикселей")
+                raise snapshot_error("Требуется JPEG размером до 16 мегапикселей")
             image.load()
             image = image.convert("RGB")
             # Re-encoding strips EXIF and any unrelated metadata.
@@ -69,7 +84,7 @@ def save_snapshot(incident_id: str, raw: bytes | None):
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
         for path in paths:
             path.unlink(missing_ok=True)
-        raise HTTPException(422, "Не удалось прочитать JPEG-снимок")
+        raise snapshot_error("Не удалось прочитать JPEG-снимок")
     return f"/static/snapshots/{paths[0].name}", f"/static/snapshots/{paths[1].name}"
 
 

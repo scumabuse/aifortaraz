@@ -302,7 +302,11 @@ def test_snapshot_size_and_ingest_auth(client, setup):
         data={"payload": json.dumps(body)},
         files={"snapshot": ("large.jpg", b"x" * (5 * 1024 * 1024 + 1), "image/jpeg")},
     )
-    assert response.status_code == 413
+    assert response.status_code == 422
+    assert response.json()["error"]["details"]["fields"][0]["location"] == [
+        "body",
+        "snapshot",
+    ]
     assert (
         client.post(
             "/api/v1/ingest/events", headers=setup["key"], data={"payload": "not-json"}

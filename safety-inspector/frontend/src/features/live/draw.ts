@@ -2,6 +2,7 @@ import type { ZoneRecord } from "../cameras/types";
 import { ppeName } from "../incidents/utils";
 import ru from "../../locales/ru.json";
 import { containRect, detectionOpacity, projectBox } from "./geometry";
+import { objectColor, objectLabel, ppeMark } from "./labels";
 import type { DetectionFrame, DetectionObject, Overlays } from "./types";
 
 const t = ru.liveUi;
@@ -188,14 +189,7 @@ export function drawOverlay(
       if (overlays.violationsOnly && (!object.state || object.state === "ok"))
         continue;
       const box = projectBox(object.bbox, rect);
-      const vehicle = ["forklift", "vehicle", "truck"].includes(object.label);
-      const color = vehicle
-        ? "#73b9ff"
-        : object.state === "danger"
-          ? "#ff6673"
-          : object.state === "violation"
-            ? "#f3a15c"
-            : "#6ee0b7";
+      const color = objectColor(object.label, object.state);
       if (object.state === "danger")
         ctx.globalAlpha =
           detectionOpacity(age) * (0.6 + 0.4 * Math.abs(Math.sin(now / 190)));
@@ -213,15 +207,12 @@ export function drawOverlay(
       )
         parts.push(`#${object.track_id}`);
       if (overlays.labels) {
-        parts.push(
-          t.objectTypes[object.label as keyof typeof t.objectTypes] ??
-            t.objectTypes.other,
-        );
+        parts.push(objectLabel(object.label, t.objectTypes));
         for (const [code, present] of Object.entries(object.ppe ?? {}).slice(
           0,
           4,
         ))
-          parts.push(`${ppeName(code)} ${present ? "✓" : "✗"}`);
+          parts.push(`${ppeName(code)} ${ppeMark(present)}`);
       }
       if (parts.length) {
         ctx.font = "13px Segoe UI, sans-serif";

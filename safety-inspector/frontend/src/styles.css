@@ -299,6 +299,26 @@
 .ppe-checks label {
   font-size: 11px;
 }
+.ppe-checks .ppe-undetectable {
+  align-items: flex-start;
+}
+.ppe-undetectable small {
+  display: block;
+  margin-top: 3px;
+  color: #edc569;
+  font-size: 10px;
+  line-height: 1.4;
+}
+.ppe-warning {
+  margin: 14px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid #73602d;
+  border-radius: 6px;
+  background: #3d3420;
+  color: #edc569;
+  font-size: 12px;
+  line-height: 1.6;
+}
 .rule-panel fieldset {
   min-width: 0;
   border: 0;
@@ -1382,6 +1402,14 @@ th {
 }
 [data-theme="light"] .global-search input {
   color: #192b35;
+}
+[data-theme="light"] .ppe-undetectable small {
+  color: #8a5a00;
+}
+[data-theme="light"] .ppe-warning {
+  color: #6f4a00;
+  background: #fff4dc;
+  border-color: #e0b360;
 }
 [data-theme="light"] :is(.report-history, .settings-log, .plan-legend) {
   color: #192b35;

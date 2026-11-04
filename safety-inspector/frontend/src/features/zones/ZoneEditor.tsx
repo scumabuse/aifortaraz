@@ -24,6 +24,7 @@ import {
 import { api, type DictionaryItem } from "../../api";
 import { Button } from "../../components/ui/button";
 import { canEdit } from "../cameras/Cameras";
+import { isPpeDetectable } from "../cameras/ppe";
 import {
   blankRules,
   type CameraRecord,
@@ -154,6 +155,19 @@ export function ZoneEditor() {
       active = false;
     };
   }, [id, attempt, editable, search]);
+  useEffect(() => {
+    const status = (event: Event) => {
+      const next = (event as CustomEvent).detail as Partial<CameraRecord> & {
+        camera_id: string;
+      };
+      if (next.camera_id === id && "supported_ppe" in next)
+        setCamera((current) =>
+          current ? { ...current, supported_ppe: next.supported_ppe } : current,
+        );
+    };
+    window.addEventListener("camera-status", status);
+    return () => window.removeEventListener("camera-status", status);
+  }, [id]);
   useEffect(() => {
     if (!container.current) return;
     const observer = new ResizeObserver((entries) =>
@@ -773,25 +787,41 @@ export function ZoneEditor() {
                 </label>
                 <h3>{t.requiredPpe}</h3>
                 <div className="ppe-checks">
-                  {ppe.map((p) => (
-                    <label key={p.code} className="check-label">
-                      <input
-                        type="checkbox"
-                        checked={zone.rules.required_ppe.includes(p.code!)}
-                        onChange={(e) =>
-                          patchRule(
-                            "required_ppe",
-                            e.target.checked
-                              ? [...zone.rules.required_ppe, p.code!]
-                              : zone.rules.required_ppe.filter(
-                                  (code) => code !== p.code,
-                                ),
-                          )
+                  {ppe.map((p) => {
+                    const detectable = isPpeDetectable(
+                      p.code!,
+                      camera.supported_ppe,
+                    );
+                    return (
+                      <label
+                        key={p.code}
+                        className={
+                          detectable
+                            ? "check-label"
+                            : "check-label ppe-undetectable"
                         }
-                      />
-                      {p.name_ru}
-                    </label>
-                  ))}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={zone.rules.required_ppe.includes(p.code!)}
+                          onChange={(e) =>
+                            patchRule(
+                              "required_ppe",
+                              e.target.checked
+                                ? [...zone.rules.required_ppe, p.code!]
+                                : zone.rules.required_ppe.filter(
+                                    (code) => code !== p.code,
+                                  ),
+                            )
+                          }
+                        />
+                        <span>
+                          {p.name_ru}
+                          {!detectable && <small>{t.notDetected}</small>}
+                        </span>
+                      </label>
+                    );
+                  })}
                 </div>
                 <label className="check-label">
                   <input

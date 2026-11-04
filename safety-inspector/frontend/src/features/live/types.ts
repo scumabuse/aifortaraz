@@ -1,6 +1,7 @@
 import type { Box } from "../incidents/types";
 export interface DetectionObject extends Box {
-  ppe?: Record<string, boolean>;
+  /** Required PPE of the person's zones: true = worn, false = missing, null = unknown. */
+  ppe?: Record<string, boolean | null> | null;
   zones?: string[];
   state?: "ok" | "violation" | "danger";
 }

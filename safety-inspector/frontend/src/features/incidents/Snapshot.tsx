@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ImageOff } from "lucide-react";
+import { boxCaption } from "../live/labels";
 import type { IncidentRecord } from "./types";
 import ru from "../../locales/ru.json";
 
@@ -13,6 +14,7 @@ export function Snapshot({
   const [failed, setFailed] = useState(false);
   const [ratio, setRatio] = useState(16 / 9);
   const url = thumbnail ? incident.thumbnail_url : incident.snapshot_url;
+  const viewWidth = Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
   useEffect(() => {
     setFailed(false);
     setRatio(
@@ -42,36 +44,45 @@ export function Snapshot({
           />
           {!thumbnail && (
             <svg
-              viewBox="0 0 1 1"
+              viewBox={`0 0 ${viewWidth} 1`}
               preserveAspectRatio="none"
               aria-label={ru.incidentUi.boxes}
             >
-              {incident.details.boxes?.map((box, index) => (
-                <g key={index}>
-                  <rect
-                    x={box.bbox[0]}
-                    y={box.bbox[1]}
-                    width={box.bbox[2]}
-                    height={box.bbox[3]}
-                    fill="none"
-                    stroke={
-                      incident.severity === "critical" ? "#ff5c69" : "#eab54d"
-                    }
-                    strokeWidth="2"
-                    vectorEffect="non-scaling-stroke"
-                  />
-                  <text
-                    x={box.bbox[0] + 0.005}
-                    y={Math.max(0.025, box.bbox[1] - 0.01)}
-                    fill="#ffffff"
-                    fontSize="0.025"
-                  >
-                    {box.track_id !== null && box.track_id !== undefined
-                      ? `#${box.track_id}`
-                      : ""}
-                  </text>
-                </g>
-              ))}
+              {incident.details.boxes?.map((box, index) => {
+                const alignEnd = box.bbox[0] > 0.75;
+                return (
+                  <g key={index}>
+                    <rect
+                      x={box.bbox[0] * viewWidth}
+                      y={box.bbox[1]}
+                      width={box.bbox[2] * viewWidth}
+                      height={box.bbox[3]}
+                      fill="none"
+                      stroke={
+                        incident.severity === "critical" ? "#ff5c69" : "#eab54d"
+                      }
+                      strokeWidth="2"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    <text
+                      x={
+                        alignEnd
+                          ? (box.bbox[0] + box.bbox[2]) * viewWidth - 0.005
+                          : box.bbox[0] * viewWidth + 0.005
+                      }
+                      y={Math.max(0.025, box.bbox[1] - 0.01)}
+                      textAnchor={alignEnd ? "end" : "start"}
+                      fill="#ffffff"
+                      stroke="#0d1820"
+                      strokeWidth="0.005"
+                      paintOrder="stroke"
+                      fontSize="0.025"
+                    >
+                      {boxCaption(box, ru.liveUi.objectTypes)}
+                    </text>
+                  </g>
+                );
+              })}
             </svg>
           )}
         </>

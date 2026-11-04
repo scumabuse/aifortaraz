@@ -4,6 +4,8 @@ import { Camera, Copy, Plus, Settings2, Trash2 } from "lucide-react";
 import { api, readSession, type DictionaryItem } from "../../api";
 import { Button } from "../../components/ui/button";
 import ru from "../../locales/ru.json";
+import { ppeName } from "../incidents/utils";
+import { zonesUndetectablePpe } from "./ppe";
 import type {
   CameraInput,
   CameraRecord,
@@ -521,6 +523,7 @@ export function CameraPage() {
       </div>
     );
   if (!camera) return <div className="skeleton">{ru.loading}</div>;
+  const undetectable = zonesUndetectablePpe(zones, camera.supported_ppe);
   return (
     <>
       <div className="page-heading">
@@ -564,6 +567,11 @@ export function CameraPage() {
         </section>
         <section className="panel">
           <h2>{t.zones}</h2>
+          {undetectable.length > 0 && (
+            <p className="ppe-warning" role="status">
+              {t.undetectablePpe}: {undetectable.map(ppeName).join(", ")}
+            </p>
+          )}
           <div className="dictionary-list">
             {zones.length ? (
               zones.map((z) => (

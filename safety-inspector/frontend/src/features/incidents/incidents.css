@@ -125,7 +125,8 @@
   font-family: monospace;
 }
 .severity-badge,
-.incident-status {
+.incident-status,
+.source-badge {
   display: inline-flex;
   align-items: center;
   border: 1px solid;
@@ -174,6 +175,21 @@
   color: #b5a5d8;
   background: #322d44;
   border-color: #5f527b;
+}
+.source-ai {
+  color: #9fd3ff;
+  background: #1d3346;
+  border-color: #44729a;
+}
+.source-mock {
+  color: #9ee1bd;
+  background: #273d30;
+  border-color: #557d63;
+}
+.source-manual {
+  color: #a2b3bf;
+  background: #24313b;
+  border-color: #3e5261;
 }
 .incident-snapshot {
   position: relative;

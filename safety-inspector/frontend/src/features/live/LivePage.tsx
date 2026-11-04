@@ -8,12 +8,13 @@ import { Button } from "../../components/ui/button";
 import { canEdit } from "../cameras/Cameras";
 import type { CameraRecord, ZoneRecord } from "../cameras/types";
 import { IncidentActions } from "../incidents/IncidentActions";
-import { SeverityBadge } from "../incidents/IncidentsPage";
+import { SeverityBadge, SourceBadge } from "../incidents/IncidentsPage";
 import { relativeTime } from "../incidents/utils";
 import type { IncidentPage, IncidentRecord } from "../incidents/types";
 import { useLiveStore } from "../realtime/store";
 import { CameraPlayer } from "./CameraPlayer";
 import { DemoSettings, useDemo } from "./DemoSettings";
+import { objectLabel, ppeMark, ppeState } from "./labels";
 import type { DetectionFrame, Overlays } from "./types";
 import ru from "../../locales/ru.json";
 import "./live.css";
@@ -108,20 +109,21 @@ function ObjectsPanel({ cameraId }: { cameraId: string }) {
               {frame.objects.map((object, index) => (
                 <tr key={`${object.track_id}-${index}`}>
                   <td>#{object.track_id ?? "—"}</td>
-                  <td>
-                    {t.objectTypes[
-                      object.label as keyof typeof t.objectTypes
-                    ] ?? t.objectTypes.other}
-                  </td>
-                  {["helmet", "vest", "glasses", "gloves"].map((code) => (
-                    <td key={code}>
-                      {object.ppe?.[code] === undefined
-                        ? "—"
-                        : object.ppe[code]
-                          ? t.present
-                          : t.missing}
-                    </td>
-                  ))}
+                  <td>{objectLabel(object.label, t.objectTypes)}</td>
+                  {["helmet", "vest", "glasses", "gloves"].map((code) => {
+                    const value = object.ppe?.[code];
+                    return (
+                      <td key={code}>
+                        {value === undefined ? (
+                          "—"
+                        ) : (
+                          <span title={t[ppeState(value)]}>
+                            {ppeMark(value)}
+                          </span>
+                        )}
+                      </td>
+                    );
+                  })}
                   <td>
                     {object.zones
                       ?.map(
@@ -490,7 +492,8 @@ export function LivePage() {
                     </div>
                     <Link to={`/incidents/${incident.id}`}>
                       <strong>{incident.type_name}</strong>
-                    </Link>
+                    </Link>{" "}
+                    <SourceBadge value={incident.source} />
                     <p>
                       {incident.camera_name} →{" "}
                       {incident.zone_name ?? ru.incidentUi.noZone}

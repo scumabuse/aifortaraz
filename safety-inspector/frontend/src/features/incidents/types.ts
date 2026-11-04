@@ -35,6 +35,14 @@ export interface IncidentRecord {
     boxes?: Box[];
     frame_size?: [number, number];
     title?: string;
+    duration_sec?: number;
+    distance_m?: number;
+    person_track_id?: number;
+    vehicle_track_id?: number;
+    pose_conf?: number;
+    immobile_sec?: number;
+    count?: number;
+    max_persons?: number;
     [key: string]: unknown;
   };
   assignee_id: string | null;

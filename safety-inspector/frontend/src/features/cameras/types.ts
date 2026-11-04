@@ -23,6 +23,8 @@ export interface CameraRecord extends CameraInput {
   zones_count: number;
   incidents_7d: number;
   source?: "ai" | "mock" | null;
+  /** PPE codes the AI model can detect (heartbeat extra.supported_ppe); null or absent = unknown. */
+  supported_ppe?: string[] | null;
 }
 export type Point = [number, number];
 export type ZoneType = "ppe" | "danger" | "vehicle" | "counting";

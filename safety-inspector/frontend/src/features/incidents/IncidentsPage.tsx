@@ -10,6 +10,12 @@ import { useLiveStore } from "../realtime/store";
 import { IncidentActions } from "./IncidentActions";
 import { Snapshot } from "./Snapshot";
 import {
+  INCIDENT_SOURCES,
+  normalizeSourceFilter,
+  sourceBadgeKind,
+  type IncidentSource,
+} from "./details";
+import {
   canAct,
   duration,
   formatDate,
@@ -41,6 +47,14 @@ export function StatusBadge({ value }: { value: IncidentRecord["status"] }) {
     </span>
   );
 }
+export function SourceBadge({ value }: { value: IncidentRecord["source"] }) {
+  const kind = sourceBadgeKind(value);
+  return kind ? (
+    <span className={`source-badge source-${kind}`} title={t.sources[kind]}>
+      {t.sourceBadges[kind]}
+    </span>
+  ) : null;
+}
 export function IncidentsPage() {
   const [search, setSearch] = useSearchParams();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -52,6 +66,7 @@ export function IncidentsPage() {
   const params = incidentParams(search).toString();
   const page = Number(search.get("page") ?? 1) || 1;
   const cameraId = search.get("camera_id") ?? "";
+  const sourceFilter = normalizeSourceFilter(search.get("source"));
   const writable = readSession()?.user.role !== "viewer";
   useLiveStore((s) => s.clock);
   const list = useQuery({
@@ -281,6 +296,28 @@ export function IncidentsPage() {
               ))}
             </select>
           </label>
+          <label>
+            {t.source}
+            <select
+              value={sourceFilter}
+              onChange={(e) => change("source", e.target.value)}
+            >
+              <option value="">{t.allSources}</option>
+              {INCIDENT_SOURCES.map((code) => (
+                <option value={code} key={code}>
+                  {t.sourceBadges[code]}
+                </option>
+              ))}
+              {sourceFilter.includes(",") && (
+                <option value={sourceFilter}>
+                  {sourceFilter
+                    .split(",")
+                    .map((code) => t.sourceBadges[code as IncidentSource])
+                    .join(" + ")}
+                </option>
+              )}
+            </select>
+          </label>
         </div>
         <div className="filter-bottom">
           <label className="check-label">
@@ -426,6 +463,7 @@ export function IncidentsPage() {
                 )}
                 <SeverityBadge value={row.severity} />
                 <StatusBadge value={row.status} />
+                <SourceBadge value={row.source} />
               </div>
               <Link to={`/incidents/${row.id}`}>
                 <h2>{row.type_name}</h2>
@@ -516,7 +554,8 @@ export function IncidentsPage() {
                     <small>{formatDate(row.started_at)}</small>
                   </td>
                   <td>
-                    <Link to={`/incidents/${row.id}`}>{row.type_name}</Link>
+                    <Link to={`/incidents/${row.id}`}>{row.type_name}</Link>{" "}
+                    <SourceBadge value={row.source} />
                   </td>
                   <td>
                     {row.camera_name}

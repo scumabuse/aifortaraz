@@ -5,7 +5,7 @@ import { Button } from "../../components/ui/button";
 import { useLiveStore } from "../realtime/store";
 import { IncidentActions } from "./IncidentActions";
 import { Snapshot } from "./Snapshot";
-import { SeverityBadge, StatusBadge } from "./IncidentsPage";
+import { SeverityBadge, SourceBadge, StatusBadge } from "./IncidentsPage";
 import { relativeTime } from "./utils";
 import type { IncidentPage } from "./types";
 import ru from "../../locales/ru.json";
@@ -45,7 +45,8 @@ export function DashboardFeed() {
                 <div>
                   <Link to={`/incidents/${incident.id}`}>
                     <strong>{incident.type_name}</strong>
-                  </Link>
+                  </Link>{" "}
+                  <SourceBadge value={incident.source} />
                   <p>
                     {incident.camera_name} → {incident.zone_name ?? t.noZone}
                   </p>

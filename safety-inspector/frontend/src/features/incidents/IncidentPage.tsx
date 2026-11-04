@@ -8,7 +8,8 @@ import { invalidateIncidents } from "../realtime/Realtime";
 import { useLiveStore } from "../realtime/store";
 import { IncidentActions } from "./IncidentActions";
 import { Snapshot } from "./Snapshot";
-import { SeverityBadge, StatusBadge } from "./IncidentsPage";
+import { SeverityBadge, SourceBadge, StatusBadge } from "./IncidentsPage";
+import { incidentDetailRows } from "./details";
 import { canAct, duration, formatDate, incidentDescription } from "./utils";
 import type { Assignee, IncidentDetail } from "./types";
 import ru from "../../locales/ru.json";
@@ -65,6 +66,7 @@ export function IncidentPage() {
       </section>
     );
   const incident = detail.data;
+  const detailRows = incidentDetailRows(incident, t);
   return (
     <>
       <div className="page-heading">
@@ -83,6 +85,7 @@ export function IncidentPage() {
           )}
           <SeverityBadge value={incident.severity} />
           <StatusBadge value={incident.status} />
+          <SourceBadge value={incident.source} />
         </div>
       </div>
       <div className="incident-detail-layout">
@@ -179,6 +182,7 @@ export function IncidentPage() {
                   incident.track_id === null ? "—" : `#${incident.track_id}`,
                 ],
                 [t.confidence, `${Math.round(incident.confidence * 100)}%`],
+                ...detailRows,
                 [
                   t.source,
                   t.sources[incident.source as keyof typeof t.sources] ??

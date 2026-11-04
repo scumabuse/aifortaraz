@@ -1,5 +1,6 @@
 import { readSession } from "../../api";
 import ru from "../../locales/ru.json";
+import { normalizeSourceFilter } from "./details";
 import type { IncidentRecord } from "./types";
 let timezone = "Asia/Yekaterinburg";
 export function setTimezone(value: string) {
@@ -127,6 +128,8 @@ export function incidentParams(search: URLSearchParams) {
     const value = search.get(key);
     if (value) result.set(key, value);
   }
+  const source = normalizeSourceFilter(search.get("source"));
+  if (source) result.set("source", source);
   if (search.get("fromDate"))
     result.set("from", periodDate(search.get("fromDate")!));
   if (search.get("toDate"))

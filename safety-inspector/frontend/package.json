@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "format": "prettier --write src",
     "format:check": "prettier --check src",
-    "test": "node --experimental-strip-types --test tests/geometry.test.mjs tests/efficiency.test.mjs"
+    "test": "node --experimental-strip-types --test tests/geometry.test.mjs tests/efficiency.test.mjs tests/labels.test.mjs tests/live-status.test.mjs tests/incident-details.test.mjs tests/supported-ppe.test.mjs"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.3",

@@ -7,6 +7,7 @@ import { Button } from "../../components/ui/button";
 import type { CameraRecord, ZoneRecord } from "../cameras/types";
 import { useLiveStore } from "../realtime/store";
 import { drawOverlay } from "./draw";
+import { isAiLive, isAiOffline } from "./status";
 import type { DetectionFrame, Overlays } from "./types";
 import ru from "../../locales/ru.json";
 
@@ -71,11 +72,8 @@ export function CameraPlayer({
   const source = mediaUrl(camera, attempt);
   props.current = { zones, overlays, demoActive, camera, status };
   const placeholder = demoActive && status !== "ready";
-  const offline =
-    !camera.ai_enabled ||
-    !camera.last_heartbeat_at ||
-    now - new Date(camera.last_heartbeat_at).getTime() > 15000 ||
-    camera.status === "offline";
+  const offline = isAiOffline(camera, now);
+  const aiLive = isAiLive(camera, now);
   useEffect(() => {
     alive.current = true;
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -326,7 +324,10 @@ export function CameraPlayer({
           aria-label={t.overlayCanvas}
         />
         <div className="player-badges">
-          {demoActive && <span className="player-demo">{t.demo}</span>}
+          {aiLive && <span className="player-ai">{t.aiBadge}</span>}
+          {demoActive && !aiLive && (
+            <span className="player-demo">{t.demo}</span>
+          )}
           {offline && (
             <span className="player-ai-offline">
               {camera.ai_enabled ? t.aiOffline : t.aiDisabled}

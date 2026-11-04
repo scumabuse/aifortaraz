@@ -142,6 +142,7 @@
   max-width: 85%;
   pointer-events: none;
 }
+.player-ai,
 .player-demo,
 .player-ai-offline {
   padding: 4px 7px;
@@ -151,6 +152,11 @@
   background: #273d30e8;
   color: #9ee1bd;
   border: 1px solid #557d63;
+}
+.player-ai {
+  background: #1d3346e8;
+  color: #9fd3ff;
+  border-color: #44729a;
 }
 .player-ai-offline {
   background: #492c26df;

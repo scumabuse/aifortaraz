@@ -1,1 +1,4 @@
-"""Client side of the integration contract: schemas, REST and WebSocket clients, the durable SQLite event spool and config sync."""
+"""Client side of the integration contract.
+
+Schemas, REST and WebSocket clients, the durable SQLite event spool and config sync.
+"""

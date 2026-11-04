@@ -1,9 +1,9 @@
 """Pydantic models of the local service configuration (spec 7.2).
 
-The YAML file, ``SAFETY_AI_<SECTION>__<KEY>`` environment variables and CLI flags are merged by
-:mod:`safety_ai.config.loader` (precedence CLI > env > YAML > defaults) and validated here. Zones and
-rules are never part of this file: they come from the backend config endpoint (contract 4.4) or,
-for the demo, from a ``--zones`` file with the same structure.
+The YAML file, ``SAFETY_AI_<SECTION>__<KEY>`` environment variables and CLI flags are merged
+by :mod:`safety_ai.config.loader` (precedence CLI > env > YAML > defaults) and validated here.
+Zones and rules are never part of this file: they come from the backend config endpoint
+(contract 4.4) or, for the demo, from a ``--zones`` file with the same structure.
 """
 
 from __future__ import annotations

@@ -1,8 +1,9 @@
 """Injectable clocks and UTC timestamp helpers.
 
-Spec 9 (Time): ``time.monotonic()`` is used for intervals and cadences, ``datetime.now(timezone.utc)``
-for timestamps; a camera's timezone is used only for zone schedules. Every component that needs
-time receives a :class:`Clock` so tests and scenarios can drive a :class:`FakeClock` per frame.
+Spec 9 (Time): ``time.monotonic()`` is used for intervals and cadences,
+``datetime.now(timezone.utc)`` for timestamps; a camera's timezone is used only for zone
+schedules. Every component that needs time receives a :class:`Clock` so tests and scenarios can
+drive a :class:`FakeClock` per frame.
 """
 
 from __future__ import annotations

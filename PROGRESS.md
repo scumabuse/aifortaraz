@@ -13,12 +13,18 @@ DECISIONS.md and CHECKLIST.md, then continue from the first unticked checklist i
 - Specification saved verbatim to docs/SPEC.md; DECISIONS.md D-001…D-026; CHECKLIST.md with every 10.2 item unticked.
 - Core shared types written: `safety_ai/clock.py`, `inference/types.py`, `capture/types.py`, `backend/schemas.py` (round-trips every contract example), `logic/types.py`, `config/models.py`.
 
-### In progress — M0 Bootstrap
-Plan: config loader (YAML + `${VAR}` + env + CLI precedence, readable errors, exit 2), JSON logging with key masking and rotation, CLI skeleton with all 13 commands, Makefile with a cross-platform `check`, lock file, docs skeletons; then commit.
+### In progress — Wave A (04:00): M0 remainder + module work of M1–M5 in parallel
+Ten parallel engineers (workflow `safety-ai-wave-a`, run wf_63c0f098-793), disjoint file ownership, each with unit tests and ruff/mypy/pytest gates on its files:
+A1 config loader + logging + Makefile + requirements.lock + quality tools + configs; A2 backend client (REST, SQLite spool + sender, WebSocket, config sync); A3 strict mock backend + mock_config.yaml; A4 capture sources; A5 inference (registry, backends, detector + tracking, pose, models_setup, bench core); A6 logic core (geometry, zones, association, smoothing, proximity); A7 fall/immobile + synthetic poses; A8 outputs (annotate, MJPEG, event recorder, preview) + metrics/health; A9 dataset pipeline + real downloads; A10 synthetic dataset + train/eval/export.
+
+### Plan after Wave A
+- Wave B: logic rules/state machines/tracks/stats/engine; fall classifier on UR Fall/Le2i; scenario model + FakeSource/FakeDetector/FakePose; worker/app/demo/CLI integration. GPU training (yolo26s then yolo26n, ≤ 3 h total) starts in the background as soon as data/merged and train.py exist.
+- Wave C: 14 scenarios + runner, integration tests (8.4), e2e + synthetic video + verify_run + demo configs + selftest, Docker/compose + docs.
+- Wave D: adversarial review and fixes, then the Verification Protocol ×3.
 
 ### Next (exact commands)
-- `.venv/Scripts/python.exe -m pytest -q tests/unit` after the M0/M1 modules land.
-- `make check` (once the Makefile exists).
+- `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests/unit tests/property` once Wave A returns.
+- `make lint typecheck test`.
 
 ### Open problems
 - Docker cannot be built on this machine (D-004 fallback).

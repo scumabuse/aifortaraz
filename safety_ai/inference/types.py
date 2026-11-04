@@ -103,7 +103,11 @@ ITEM_LABELS: Final[tuple[str, ...]] = PPE_CODES + BARE_PARTS
 BOX_LABELS: Final[tuple[str, ...]] = (PERSON_LABEL, *VEHICLE_LABELS, *PPE_CODES, *BARE_PARTS)
 
 # COCO-pretrained fallback for the vehicle role (spec 5.3): car/truck/bus -> vehicle.
-COCO_VEHICLE_MAP: Final[Mapping[str, str]] = {"car": "vehicle", "truck": "vehicle", "bus": "vehicle"}
+COCO_VEHICLE_MAP: Final[Mapping[str, str]] = {
+    "car": "vehicle",
+    "truck": "vehicle",
+    "bus": "vehicle",
+}
 
 # COCO-17 keypoint indices (pose models, spec 5.9).
 KP_NOSE: Final[int] = 0
@@ -291,5 +295,5 @@ class PoseEstimator(Protocol):
         ...
 
     def estimate(self, frame: Frame, targets: Mapping[int, BBox]) -> dict[int, Keypoints]:
-        """Return keypoints for each requested ``track_id -> person box`` (missing when not found)."""
+        """Return keypoints per requested ``track_id -> person box``; absent when not found."""
         ...

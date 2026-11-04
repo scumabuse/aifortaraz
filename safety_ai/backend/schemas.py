@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Annotated, Any, Final, Literal, Union
+from typing import Annotated, Any, Final, Literal, cast
 
 from pydantic import (
     AfterValidator,
@@ -176,7 +176,9 @@ NonNegFloat = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
 PosFloat = Annotated[float, Field(gt=0.0, allow_inf_nan=False)]
 NonNegInt = Annotated[int, Field(ge=0)]
 PosInt = Annotated[int, Field(gt=0)]
-CameraId = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")]
+CameraId = Annotated[
+    str, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+]
 ZoneId = Annotated[str, Field(min_length=1, max_length=128)]
 
 _BBOX_TOLERANCE: Final[float] = 1e-3
@@ -292,15 +294,15 @@ class CustomDetails(StrictModel):
     frame_size: FrameSize
 
 
-EventDetails = Union[
-    PpeViolationDetails,
-    ZoneIntrusionDetails,
-    VehicleProximityDetails,
-    FallDetectedDetails,
-    PersonImmobileDetails,
-    OvercrowdingDetails,
-    CustomDetails,
-]
+EventDetails = (
+    PpeViolationDetails
+    | ZoneIntrusionDetails
+    | VehicleProximityDetails
+    | FallDetectedDetails
+    | PersonImmobileDetails
+    | OvercrowdingDetails
+    | CustomDetails
+)
 
 DETAILS_BY_TYPE: Final[dict[str, type[StrictModel]]] = {
     "ppe_violation": PpeViolationDetails,
@@ -492,7 +494,7 @@ class VehicleObject(StrictModel):
     conf: Confidence
 
 
-DetectedObject = Annotated[Union[PersonObject, VehicleObject], Field(discriminator="label")]
+DetectedObject = Annotated[PersonObject | VehicleObject, Field(discriminator="label")]
 
 
 class DetectionsMessage(StrictModel):
@@ -553,9 +555,7 @@ class ServerErrorMessage(LenientModel):
         return None
 
 
-ServerMessage = Annotated[
-    Union[ConfigUpdatedMessage, ServerErrorMessage], Field(discriminator="type")
-]
+ServerMessage = Annotated[ConfigUpdatedMessage | ServerErrorMessage, Field(discriminator="type")]
 
 
 def parse_server_message(data: Any) -> ConfigUpdatedMessage | ServerErrorMessage | None:
@@ -587,6 +587,11 @@ def _drop_unknown_ppe(value: Any) -> Any:
 
 
 PpeList = Annotated[list[PpeCode], BeforeValidator(_drop_unknown_ppe)]
+
+
+def _all_ppe_codes() -> list[PpeCode]:
+    """Default ``ppe_types``: every PPE code of the contract."""
+    return cast(list[PpeCode], list(PPE_CODE_VALUES))
 
 
 def _parse_hhmm(value: str) -> int:
@@ -693,7 +698,7 @@ class CameraConfig(LenientModel):
     camera: CameraInfo
     frame_size_hint: FrameSize | None = None
     thresholds: Thresholds = Field(default_factory=Thresholds)
-    ppe_types: PpeList = Field(default_factory=lambda: list(PPE_CODE_VALUES))
+    ppe_types: PpeList = Field(default_factory=_all_ppe_codes)
     zones: list[Zone] = Field(default_factory=list)
     version: int = 0
     updated_at: datetime | None = None

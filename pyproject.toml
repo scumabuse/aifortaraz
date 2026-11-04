@@ -18,6 +18,7 @@ classifiers = [
 ]
 dependencies = [
   "ultralytics>=8.3.0",
+  "lap>=0.5.12",  # ByteTrack/BoT-SORT assignment solver used by the Ultralytics tracker
   "torch>=2.2",
   "torchvision>=0.17",
   "opencv-python-headless>=4.9",

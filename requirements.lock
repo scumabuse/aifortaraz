@@ -74,6 +74,8 @@ kagglesdk==0.1.38
     # via kagglehub
 kiwisolver==1.5.1
     # via matplotlib
+lap==0.5.14
+    # via safety-ai (pyproject.toml)
 markdown-it-py==4.2.0
     # via rich
 markupsafe==3.0.4
@@ -97,6 +99,7 @@ numpy==2.4.6
     #   safety-ai (pyproject.toml)
     #   contourpy
     #   imagehash
+    #   lap
     #   matplotlib
     #   ml-dtypes
     #   onnx

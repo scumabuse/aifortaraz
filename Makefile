@@ -43,7 +43,7 @@ help:
 	$(info $(indent)check         lint, typecheck, test, e2e and placeholders, in that order)
 	$(info $(indent)placeholders  fail on placeholders in safety_ai, tools and tests)
 	$(info $(indent)demo          offline demo on data/samples/synthetic_people.mp4 with MJPEG)
-	$(info $(indent)mock          strict mock backend on port 8000)
+	$(info $(indent)mock          strict mock backend on port 8010 (the website backend uses 8000))
 	$(info $(indent)train, eval, bench, selftest  safety-ai CLI commands (MODEL=$(MODEL), ARGS=...))
 	$(info $(indent)models        download or export the weights listed in models/registry.json)
 	$(info $(indent)lock          regenerate requirements.lock for the CPU Docker image (uv))
@@ -84,7 +84,7 @@ demo:
 	$(PY) -m safety_ai.cli demo --source data/samples/synthetic_people.mp4 --zones tools/demo_zones.yaml --mjpeg --loop
 
 mock:
-	$(PY) -m safety_ai.cli mock-backend --port 8000 --config tools/mock_config.yaml
+	$(PY) -m safety_ai.cli mock-backend --port 8010 --config tools/mock_config.yaml
 
 train:
 	$(PY) -m safety_ai.cli train $(ARGS)

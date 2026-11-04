@@ -83,13 +83,13 @@ that were rejected (spec 3). Ids are stable; later decisions may supersede earli
 ## D-017 `thresholds.min_confidence`
 - **Decision:** persons and vehicles below the backend's `min_confidence` (fallback: local `thresholds.min_confidence`) are not passed to the rules; PPE items and bare parts are filtered only by the inference threshold (`thresholds.conf` and per-class overrides), because item confidences are naturally lower and filtering them would turn PRESENT into MISSING.
 
-## D-018 Severity
+## D-018 Severity (superseded by D-032)
 - **Decision:** `severity` is `null` for every type except `fall_detected` and `person_immobile`, which are `critical` (spec 5.9). `severity_override` is applied by the backend, not by this module.
 
 ## D-019 Strict outgoing, lenient incoming
 - **Decision:** outgoing models use `extra="forbid"`; incoming config and server messages ignore unknown fields and drop unknown PPE codes with a warning, so a newer website does not take the AI offline.
 
-## D-020 Heartbeat extra
+## D-020 Heartbeat extra (refined by D-035)
 - **Decision:** `heartbeat.extra` carries `device`, `backend`, `queue_depth`, `frames_dropped`, `stream` (as in the contract) plus `model_family` (spec 5.3 requires the family choice in the heartbeat extra).
 
 ## D-021 OpenCV packages
@@ -126,6 +126,54 @@ that were rejected (spec 3). Ids are stable; later decisions may supersede earli
 
 ## D-031 PPE values in the detections stream
 - **Decision:** for each required item: `false` while the item is in VIOLATION, `true` when its smoothed score is ≥ `present_on`, `null` otherwise (unknown or not yet decided).
+
+## D-032 Severity is null for every type (supersedes D-018)
+- **Decision:** the AI sends `severity: null` for every event type, fall_detected and person_immobile included (`SEVERITY_BY_TYPE` in `safety_ai/logic/rules.py` is all null). The integration contract (`contract/CONTRACT.md` 4.1 at the integration root, copied byte for byte to `docs/CONTRACT.md`) makes the website resolve it: null → the zone's `severity_override` → the type default (fall_detected and person_immobile critical, zone_intrusion and vehicle_proximity high, ppe_violation medium or high when the helmet is missing in a danger zone, overcrowding low, custom medium). The website keeps a non-null value as sent, so the former fixed `critical` bypassed an operator's zone override (integration matrix row 27).
+- **Rejected:** keeping `critical` for falls (bypasses the override); applying the override in the AI (the website owns zones and the resolution; two implementations would drift).
+
+## D-033 A refused API key (HTTP 401/403) is an operator problem, never a rejection
+- **Decision:** `classify_status` maps 401 and 403 to the outcome `unauthorized`. The spool sender keeps such an item pending and retries it every 10 s (fixed; the exponential backoff and the three-attempt 4xx budget are untouched) and logs one ERROR line per minute for all cameras together: `backend rejected the API key (HTTP 401) for POST /api/v1/ingest/events — check SAFETY_AI_API_KEY / the website's AI key; …`. Heartbeat and stats posts log the same line (one shared limit per minute) and keep going; ConfigSync logs it, keeps the current or cached configuration and retries every 10 s until a request succeeds, then every 60 s again; the WebSocket client reports a refused handshake (the website answers 403) the same way and reconnects every 10 s. `RestClient.unauthorized` (a 401/403 newer than the last 2xx), `last_auth_error_at`, `last_auth_error_status`, `auth_error_count`, `SpoolSender.unauthorized` / `unauthorized_count`, `ConfigSync.unauthorized` and `WsClient.unauthorized` / `last_auth_error_at` let the integration layer show "unauthorized" in `/health`. The key itself is never logged (integration matrix row 3, integration spec 6.2.1).
+- **Rejected:** treating 401/403 as client errors (events went to `logs/rejected/` after three attempts, so a key rotation lost them); exponential backoff for refusals (after fixing the key the operator expects recovery within seconds); one line per request (a log storm, heartbeats alone run every 5 s per camera).
+
+## D-034 Configurations from the website are lenient, operator-written files strict
+- **Decision:** a configuration received from the website tolerates `null` for `thresholds`, `ppe_types`, `zones`, `version` and a zone's `rules` / `enabled`, and an invalid zone is skipped with a WARNING while the other zones and the thresholds still apply (one bad polygon must not take the camera offline). Problems of the configuration itself (camera, threshold values, duplicate zone ids, a container of the wrong type) still reject it, so the last good (cached) configuration stays in use. Zones files (`--zones`, `load_zones_file`) and scenario YAML are written by the operator and are validated with the `STRICT_ZONES` validation context of `safety_ai/backend/schemas.py`: an invalid zone fails at startup with a readable line (`zones.0.polygon: …`) instead of silently disappearing.
+- **Rejected:** strict everywhere (the previous behaviour: a zone typo on the website took the camera offline, integration matrix rows 60–62); lenient everywhere (a typo in a local file would silently drop a zone).
+
+## D-035 `heartbeat.extra` is free-form; `supported_ppe` is left out when unknown (refines D-020)
+- **Decision:** `HeartbeatExtra` still carries the keys of D-020 and accepts any other key (contract 4.2: `extra` is free-form). `supported_ppe` is the list of PPE codes the loaded model detects; when it is unknown (None) the key is left out of the JSON, because the contract asks both sides to tolerate the key being absent, not `null`.
+- **Rejected:** sending `"supported_ppe": null` (a reader that iterates over a present key fails).
+
+## D-036 The strict mock backend follows the integration contract
+- **Decision:** `tools/mock_backend.py` (1) listens on 8010 by default (`DEFAULT_PORT`: `serve()`, `python -m tools.mock_backend`, `make mock`, docker-compose), because the website backend owns 8000; (2) answers every error with the contract body `{"error": {"code", "message", "details"}}` and the website's codes (`unauthorized`, `not_found`, `conflict`, `payload_too_large`, `unsupported_media_type`, `validation_error`; the problems of a 413/415/422 in `details.fields` as `[{"location", "message"}]`, the website's shape; injected faults included); (3) accepts a free-form heartbeat `extra` of at most 16 KB of plain JSON (the website's limit) and checks only that `supported_ppe`, when present, is a list of distinct PPE codes; (4) refuses another `Content-Type` with 415 and a snapshot over 5 MB with 413, both recorded as violations; (5) resolves severity like the website: the payload's value, else the zone's override, else the contract's type default (ppe_violation high for a missing helmet in a danger zone, overcrowding low, custom medium). Everything else stays strict (D-024). `docs/SPEC.md` stays verbatim (D-002); its section 4 and the `--port 8000` of 8.1 are superseded by `docs/CONTRACT.md` and this decision.
+- **Rejected:** keeping 8000 (collides with the website on one machine); mock-specific error bodies (the AI's logs and the selftest must see what the website sends).
+
+## D-037 `docs/CONTRACT.md` is the integration contract
+- **Decision:** `docs/CONTRACT.md` is a binary copy of the integration root's `contract/CONTRACT.md` (the single source of truth, integration matrix row 111). `tests/unit/docs/test_docs_contract.py` checks its sections (4.1 … 4.8), endpoints and rules (`extra.supported_ppe`, the error body, the severity resolution, schedule days 1..7) and, inside the integration checkout, that its bytes equal the root copy.
+- **Rejected:** comparing it with section 4 of `docs/SPEC.md` (the superseded contract).
+
+## D-038 Heartbeats and statistics come from a pump thread, not from the frame loop
+- **Decision:** every worker starts a `HeartbeatPump` thread (`safety_ai/worker.py`) at worker start: a drift-free 5 s cadence that reports `connecting`/`degraded` while models load and the pipeline status afterwards; closed one-minute statistics windows go to the same telemetry sinks. Heartbeat/stats requests time out after at most 2.5 s per phase, and the spool depth reported in heartbeats is cached on the pipeline thread (an SQLite read on the pump thread delayed beats under load).
+- **Rejected:** heartbeats coupled to processed frames — slow first CUDA frames produced 6–9 s gaps and one 10.8 s gap under load, which the website shows as the camera going offline.
+
+## D-039 Hang watchdog for camera workers
+- **Decision:** the supervisor terminates a worker that is not running 300 s after start, or that has been silent for 60 s while running (killed 5 s later if it does not exit), and handles it like a crash (restart with back-off).
+- **Reason:** one e2e run had both workers stall in warm-up for more than 60 s while another program was using the same GPU; the crash path alone never fired because the processes were alive.
+- **Rejected:** waiting indefinitely; restarting on a fixed schedule.
+
+## D-040 Orphaned events are closed once after a crash or kill
+- **Decision:** the spool keeps an `event_alive` table with a last-alive mark per open event (every 2 s). On start, events left open by the previous run get one `PATCH ended_at` with the last alive mark (or the POST's spool time when there is none). Recovery runs in one transaction and the spooled PATCH item makes it idempotent: a second restart sends nothing.
+- **Rejected:** leaving the events open on the website; closing them with the restart time (overstates their duration).
+
+## D-041 With a backend, the website's camera configuration always wins
+- **Decision:** when a backend is configured, zones, thresholds and PPE types come from `GET /api/v1/ingest/config/{camera_id}` (and `config.updated` pushes), also for `fake:` sources; a camera runs with an empty configuration until the first config arrives. Without a backend the order is `zones_file`, then the scenario's zones, then none. A camera whose stream URL is the module's own MJPEG endpoint (same port and `/stream/<id>.mjpeg`; the host is ignored because the AI host's aliases cannot be listed reliably) is marked failed until its configuration changes.
+- **Rejected:** merging local and website zones (two sources of truth for one camera).
+
+## D-042 Warm-up, worker exit and HTTP keep-alive
+- **Decision:** workers run two warm-up frames (Ultralytics' `bus.jpg`) before the first real frame (first real frame ≈1 s instead of 8.6 s); workers leave with `os._exit` after their own cleanup because CUDA teardown takes seconds and would break the 2 s stop budget; the HTTP client keeps connections alive for 2 s, below uvicorn's 5 s, to avoid the keep-alive race (`ReadError`).
+- **Rejected:** default interpreter teardown; default keep-alive.
+
+## D-043 `lap` is a declared dependency
+- **Decision:** `lap>=0.5.12` is in `pyproject.toml` and `requirements.lock` pins `lap==0.5.14`: the Ultralytics tracker imports it at run time and it was only present in the development venv.
 
 # PPE training on Construction-PPE
 

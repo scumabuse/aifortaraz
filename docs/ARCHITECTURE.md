@@ -3,7 +3,8 @@
 This document is the design contract of the codebase: data flow, process model, module
 responsibilities, the public API at every module boundary, and the exact semantics chosen where the
 specification leaves room (each such choice is also recorded in DECISIONS.md). The specification is
-`docs/SPEC.md`; the integration contract is `docs/CONTRACT.md` (spec section 4).
+`docs/SPEC.md`; the integration contract is `docs/CONTRACT.md`, a byte-identical copy of the
+integration root's `contract/CONTRACT.md` (it supersedes section 4 of the specification).
 
 ## 1. Data flow (one camera)
 
@@ -72,7 +73,9 @@ Shared value types (already implemented). Do not change their public names; addi
   `homography`. Validation errors raise `ConfigError` whose `messages` hold one readable line per
   field (`cameras.0.timezone: unknown timezone 'Mars/Base'`); the CLI prints them and exits with 2.
 - `zones.py`: `load_zones_file(path: Path, camera_id: str) -> CameraConfig` for `--zones` (the
-  file has the structure of the contract's config response; `camera.id` is overridden).
+  file has the structure of the contract's config response; `camera.id` is overridden). It is
+  validated with the `STRICT_ZONES` context: an invalid zone is an error here, while a config
+  received from the website skips it with a WARNING (D-034).
 
 ### 3.3 `safety_ai/telemetry/`
 - `logging.py`: `configure_logging(settings: TelemetrySettings, *, console: bool, json_lines: bool | None = None, secrets: Sequence[str] = ()) -> None`; JSON lines (`ts`, `level`, `logger`, `msg`, plus `camera_id`, `track_id`, `external_id` when bound), human console format for demo/--show, rotating file 50 MB × 5, every configured secret masked (`****`) in messages, args and tracebacks. `get_logger(name, **bound) -> logging.LoggerAdapter`. `mask_secret(text, secrets) -> str`.
@@ -80,13 +83,13 @@ Shared value types (already implemented). Do not change their public names; addi
 - `health.py`: `CameraHealth` dataclass (stream_state, processed_fps, last_frame_age_s, backend_reachable, spool_depth, active_events, restarts, failed) and `HealthServer(host, port, provider: Callable[[], HealthReport], metrics_text: Callable[[], bytes])` serving `GET /health` (200 when every enabled camera is healthy, else 503, JSON body) and `GET /metrics`.
 
 ### 3.4 `safety_ai/backend/`
-- `rest_client.py`: `RestClient(base_url: str, api_key: str | None, timeout_s: float, *, transport: httpx.BaseTransport | None = None)`; `post_event(payload: EventPayload, snapshot_jpeg: bytes, *, as_json: bool = False) -> PostOutcome`; `patch_event(external_id: str, ended_at: datetime) -> PatchOutcome`; `post_heartbeat(HeartbeatPayload) -> bool`; `post_stats(StatsPayload) -> bool`; `get_config(camera_id) -> CameraConfig`; `get_all_configs() -> list[CameraConfig]`; `close()`. Every request sends `X-API-Key`; outcomes classify `ok` (201/200/202, with the returned id), `retry` (connection error, timeout, 5xx, with an optional `retry_after_s` for 429), `rejected_422`, `client_error` (other 4xx except 409/429), `not_found` (404 on PATCH), `conflict` (409, treated as already accepted).
-- `spool.py`: `EventSpool(path: Path)` (SQLite, WAL, thread- and process-safe): `enqueue_post(payload, snapshot_jpeg)`, `enqueue_patch(camera_id, external_id, ended_at)`, `next_batch(camera_id)`, `mark_done(item_id, backend_id=None)`, `mark_failed_attempt(...)`, `move_to_rejected(item_id, reason, body, rejected_dir)`, `pending_count(camera_id=None) -> int`, `has_external_id(external_id) -> bool`, `backend_id(external_id) -> str | None`. `SpoolSender(spool, client, clock, *, rejected_dir: Path, metrics=None)`: a thread that drains each camera's queue strictly in insertion order (one lane per camera, so a stuck camera never blocks another), retries connection errors/timeouts/5xx forever with exponential backoff 0.5 s -> 30 s with jitter, honours `Retry-After` on 429, gives other 4xx (except 409/429) 3 attempts then moves the item to `logs/rejected/`, logs 422 at ERROR with the response body and moves it to `logs/rejected/` immediately, re-POSTs with `ended_at` set when a PATCH returns 404 (then stops retrying that PATCH), and records the backend id next to the external_id. `flush(timeout_s) -> int` drains synchronously (used at shutdown and by deterministic tests); `start()` / `stop(flush_timeout_s=2.0)`.
-- `ws_client.py`: `WsClient(ws_url: str, api_key: str | None, *, on_server_message: Callable[[ConfigUpdatedMessage | ServerErrorMessage], None], clock: Clock, max_queue: int = 256)`; runs an asyncio loop in a thread; `send(message: DetectionsMessage | FrameMessage | HeartbeatMessage) -> bool` is non-blocking and drops the message while disconnected or when the bounded queue is full (these are ephemeral); reconnects with backoff 1, 2, 4 … 30 s plus jitter; logs `error` messages at WARNING with the offending id; `connected` property; `start()` / `stop()`.
-- `config_sync.py`: `ConfigSync(client: RestClient, cache_dir: Path, camera_ids: Sequence[str], *, on_config: Callable[[CameraConfig], None], clock: Clock, refresh_s: float = 60.0)`; `load_initial() -> dict[str, CameraConfig]` (backend first, then `cache/config_<camera_id>.json`); `refresh(camera_id: str | None = None)` (called every 60 s and on `config.updated`); calls `on_config` only when the version or content changed; writes the cache atomically.
+- `rest_client.py`: `RestClient(base_url: str, api_key: str | None, timeout_s: float, *, transport: httpx.BaseTransport | None = None)`; `post_event(payload: EventPayload, snapshot_jpeg: bytes, *, as_json: bool = False) -> PostOutcome`; `patch_event(external_id: str, ended_at: datetime) -> PatchOutcome`; `post_heartbeat(HeartbeatPayload) -> bool`; `post_stats(StatsPayload) -> bool`; `get_config(camera_id) -> CameraConfig`; `get_all_configs() -> list[CameraConfig]`; `close()`. Every request sends `X-API-Key`; outcomes classify `ok` (201/200/202, with the returned id), `retry` (connection error, timeout, 5xx, with an optional `retry_after_s` for 429), `rejected_422`, `unauthorized` (401/403: a wrong or revoked API key, never a client bug), `client_error` (other 4xx except 409/429), `not_found` (404 on PATCH), `conflict` (409, treated as already accepted). `unauthorized`, `last_auth_error_at`, `last_auth_error_status` and `auth_error_count` expose the refused-key state for `/health`; heartbeat and stats refusals log `auth_error_message(...)` ("backend rejected the API key (HTTP 401) for <endpoint> — check SAFETY_AI_API_KEY / the website's AI key", the key never printed) at ERROR at most once per minute; config requests raise `BackendError` with `unauthorized` True (D-033).
+- `spool.py`: `EventSpool(path: Path)` (SQLite, WAL, thread- and process-safe): `enqueue_post(payload, snapshot_jpeg)`, `enqueue_patch(camera_id, external_id, ended_at)`, `next_batch(camera_id)`, `mark_done(item_id, backend_id=None)`, `mark_failed_attempt(...)`, `move_to_rejected(item_id, reason, body, rejected_dir)`, `pending_count(camera_id=None) -> int`, `has_external_id(external_id) -> bool`, `backend_id(external_id) -> str | None`. `SpoolSender(spool, client, clock, *, rejected_dir: Path, metrics=None)`: a thread that drains each camera's queue strictly in insertion order (one lane per camera, so a stuck camera never blocks another), retries connection errors/timeouts/5xx forever with exponential backoff 0.5 s -> 30 s with jitter, honours `Retry-After` on 429, keeps an item refused with 401/403 pending and retries it every `auth_retry_s` (10 s, fixed) with one readable ERROR line per minute for all cameras (`unauthorized`, `unauthorized_count`), gives other 4xx (except 409/429) 3 attempts then moves the item to `logs/rejected/`, logs 422 at ERROR with the response body and moves it to `logs/rejected/` immediately, re-POSTs with `ended_at` set when a PATCH returns 404 (then stops retrying that PATCH), and records the backend id next to the external_id. `flush(timeout_s) -> int` drains synchronously (used at shutdown and by deterministic tests); `start()` / `stop(flush_timeout_s=2.0)`.
+- `ws_client.py`: `WsClient(ws_url: str, api_key: str | None, *, on_server_message: Callable[[ConfigUpdatedMessage | ServerErrorMessage], None], clock: Clock, max_queue: int = 256)`; runs an asyncio loop in a thread; `send(message: DetectionsMessage | FrameMessage | HeartbeatMessage) -> bool` is non-blocking and drops the message while disconnected or when the bounded queue is full (these are ephemeral); reconnects with backoff 1, 2, 4 … 30 s plus jitter (every `auth_retry_s` = 10 s, with one readable ERROR line per minute, after a handshake refused with 401/403; `unauthorized`, `last_auth_error_at`); logs `error` messages at WARNING with the offending id; `connected` property; `start()` / `stop()`.
+- `config_sync.py`: `ConfigSync(client: RestClient, cache_dir: Path, camera_ids: Sequence[str], *, on_config: Callable[[CameraConfig], None], clock: Clock, refresh_s: float = 60.0)`; `load_initial() -> dict[str, CameraConfig]` (backend first, then `cache/config_<camera_id>.json`); `refresh(camera_id: str | None = None)` (called every 60 s and on `config.updated`); calls `on_config` only when the version or content changed; writes the cache atomically. A refused key (401/403) is logged readably at most once per minute, the cameras keep their current or cached configuration, `unauthorized` is True and the thread retries every 10 s until the key is accepted, then every `refresh_s` again (D-033).
 
 ### 3.5 `tools/mock_backend.py` (strict mock, FastAPI + uvicorn)
-Independent validation models written from docs/CONTRACT.md (D-024). `create_app(config_path: Path, data_dir: Path) -> FastAPI`; `MockBackendServer(port: int = 0, config_path=..., data_dir=...)` context manager running uvicorn in a thread and exposing `base_url` / `ws_url`, used by tests, selftest and the demo. Endpoints of contract 4 plus `/debug/events`, `/debug/messages`, `/debug/stats`, `/debug/heartbeats`, `/debug/violations`, `POST /debug/reload-config`, `POST /debug/fail-next?status=503&count=3`, `POST /debug/reset`, `GET /health`. Any contract violation is recorded in `/debug/violations` (and returned as 422).
+Independent validation models written from docs/CONTRACT.md (D-024). `create_app(config_path: Path, data_dir: Path) -> FastAPI`; `MockBackendServer(port: int = 0, config_path=..., data_dir=...)` context manager running uvicorn in a thread and exposing `base_url` / `ws_url`, used by tests, selftest and the demo. Endpoints of contract 4 plus `/debug/events`, `/debug/messages`, `/debug/stats`, `/debug/heartbeats`, `/debug/violations`, `POST /debug/reload-config`, `POST /debug/fail-next?status=503&count=3`, `POST /debug/reset`, `GET /health`. Any contract violation is recorded in `/debug/violations` (and returned as 422, or 401/413/415 for a missing key, an oversized snapshot or a wrong Content-Type). Every error response uses the contract body `{"error": {"code", "message", "details"}}` (field errors of a 422 in `details.fields`). Default port 8010 (D-036).
 
 ### 3.6 `safety_ai/capture/`
 - `latest_slot.py`: `LatestSlot[T]`: `put(item) -> bool` (True when an unread item was overwritten = dropped), `get(timeout) -> T | None`, `close()`.
@@ -123,15 +126,25 @@ Independent validation models written from docs/CONTRACT.md (D-024). `create_app
 
 ```python
 class LogicEngine:
-    def __init__(self, camera_id: str, config: CameraConfig, settings: LogicSettings, *,
-                 timezone: str = "UTC", homography: Sequence[Sequence[float]] | None = None,
-                 id_allocator: ExternalIdAllocator | None = None,
-                 fall_classifier: FallClassifier | None = None) -> None: ...
+    def __init__(
+        self,
+        camera_id: str,
+        config: CameraConfig,
+        settings: LogicSettings,
+        *,
+        timezone: str = "UTC",
+        homography: Sequence[Sequence[float]] | None = None,
+        id_allocator: ExternalIdAllocator | None = None,
+        fall_classifier: FallClassifier | None = None,
+    ) -> None: ...
     @property
     def config(self) -> CameraConfig: ...
-    def update_config(self, config: CameraConfig, mono: float, utc: datetime) -> tuple[EventEnd, ...]: ...
-    def pose_targets(self, frame_id: int, mono: float, persons: Sequence[Detection],
-                     frame_w: int, frame_h: int) -> set[int]: ...
+    def update_config(
+        self, config: CameraConfig, mono: float, utc: datetime
+    ) -> tuple[EventEnd, ...]: ...
+    def pose_targets(
+        self, frame_id: int, mono: float, persons: Sequence[Detection], frame_w: int, frame_h: int
+    ) -> set[int]: ...
     def process(self, obs: FrameObservation) -> FrameResult: ...
     def shutdown(self, mono: float, utc: datetime) -> tuple[EventEnd, ...]: ...
     def active_event_ids(self) -> tuple[str, ...]: ...
@@ -146,6 +159,10 @@ class LogicEngine:
 ### 3.10 Integration layer
 - `worker.py`: `CameraPipeline(camera_id, settings, detector, pose, engine, sinks, clock, ...)` with `process_frame(frame) -> FrameResult` (synchronous; used by scenarios with a fake clock) and `run(source, stop_event)` (real-time loop: target FPS with adaptive skipping, EMA FPS over 10 s, heartbeat every 5 s, status snapshots). `worker_main(...)` is the spawn entry point.
 - `app.py`: `Supervisor` (spawn, restart policy, queues, WS, config sync, spool sender, MJPEG, health/metrics, signals).
+- Heartbeats and closed statistics windows come from a per-worker `HeartbeatPump` thread with a drift-free 5 s cadence, independent of frame processing (D-038).
+- The supervisor's hang watchdog terminates a worker that is not running 300 s after start or silent for 60 s while running, and restarts it like a crashed one (D-039).
+- The spool's `event_alive` table holds a last-alive mark per open event; on start, events orphaned by a killed run are closed once with that mark (D-040).
+- With a backend, the website's camera configuration always wins, also for `fake:` sources; a camera pointed at the module's own MJPEG URL is failed until its configuration changes (D-041).
 - `demo.py`: the in-process demo runner.
 - `cli.py`: typer app `safety-ai` with run, demo, mock-backend, data, train, eval, export, bench, calibrate, capture, autolabel, selftest, version.
 
@@ -198,9 +215,12 @@ current frame's UTC time, except for track loss where it is the UTC time the tra
 | overcrowding | zone | persons inside > `max_persons`; N = confirm_frames | count ≤ max_persons for confirm_frames frames | the zone | lowest id inside | null |
 | vehicle_proximity | (zone, person, vehicle) | person inside, vehicle box overlaps zone, distance < `min_vehicle_distance_m`; N = max(3, confirm_frames // 2) | distance ≥ 1.2 × threshold for confirm_frames frames, or either track lost | the zone | person | null |
 | ppe_violation | track | any required item in VIOLATION; N = 1 (the item smoothing already confirmed it) | no item in VIOLATION for confirm_frames frames, person left all PPE zones, or track lost | first zone (config order) the person is in that requires a violated item | person | null |
-| fall_detected | track | rapid transition followed by horizontal posture persisting ≥ 2.0 s (time based) | upright (torso ≤ 35°) for 2 s, or track unseen for 10 s | first zone the person is in, else null | person | critical |
-| person_immobile | track | horizontal and centroid displacement < 2 % of frame width for ≥ immobile_sec; suppressed while a fall event of the track is younger than 30 s | posture not horizontal for 2 s, displacement ≥ 2 %, or track unseen for 10 s | first zone, else null | person | critical |
+| fall_detected | track | rapid transition followed by horizontal posture persisting ≥ 2.0 s (time based) | upright (torso ≤ 35°) for 2 s, or track unseen for 10 s | first zone the person is in, else null | person | null |
+| person_immobile | track | horizontal and centroid displacement < 2 % of frame width for ≥ immobile_sec; suppressed while a fall event of the track is younger than 30 s | posture not horizontal for 2 s, displacement ≥ 2 %, or track unseen for 10 s | first zone, else null | person | null |
 
+- `severity` is null for every type: the website resolves null -> the zone's `severity_override`
+  -> the type default (fall_detected and person_immobile critical), so the AI never bypasses an
+  operator's override (integration contract 4.1, D-032).
 - `confidence` is the primary object's detector confidence at confirmation (for overcrowding: the
   person with the lowest track id). `distance_m` is the minimum observed during confirmation.
   `duration_sec` is the time since the membership became inside. `missing_ppe` = all items in

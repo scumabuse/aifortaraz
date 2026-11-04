@@ -1,0 +1,29 @@
+{
+  "detected_at": "2026-11-04T17:36:11Z",
+  "os": "Windows-11-10.0.26200-SP0",
+  "python": "3.12.10",
+  "torch": "2.14.1+cu126",
+  "torch_cuda": "12.6",
+  "cudnn": 91002,
+  "ultralytics": "8.4.201",
+  "cpu": "Intel(R) Core(TM) i5-10400F CPU @ 2.90GHz",
+  "cpu_logical": 12,
+  "cpu_physical": 6,
+  "ram_total_gib": 15.9,
+  "ram_available_gib": 3.3,
+  "cuda_available": true,
+  "gpus": [
+    {
+      "index": 0,
+      "name": "NVIDIA GeForce GTX 1660 SUPER",
+      "vram_total_mib": 6143,
+      "vram_used_mib": 2319,
+      "driver": "610.88",
+      "compute_capability": "7.5"
+    }
+  ],
+  "mps_available": false,
+  "mode": "gpu",
+  "device": "cuda:0",
+  "reason": "CUDA device 0 (NVIDIA GeForce GTX 1660 SUPER) has 6.0 GiB VRAM >= 6 GB"
+}

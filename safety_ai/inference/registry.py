@@ -4,12 +4,21 @@ The registry file is a JSON list of :class:`RegistryEntry` objects. The runtime 
 refers to registry names, never to raw paths, and :meth:`ModelRegistry.resolve` accepts:
 
 * an exact entry name, e.g. ``pose_n`` or ``ppe_s_20261104``;
+* an explicit alias listed in one entry's ``aliases`` (e.g. ``ppe_cppe_latest``); explicit
+  aliases are unique across the registry, never equal an entry name and take precedence over
+  the computed aliases below;
 * ``<role>_<variant>_latest``: the entry with the newest ``created_at`` among the entries of
   that role and variant, e.g. ``ppe_s_latest``;
 * ``<role>_latest``: the newest entry of that role.
 
 Equal ``created_at`` values are broken by file order (the later entry wins). Entry names ending
-in ``_latest`` are rejected because they would shadow the aliases.
+in ``_latest`` are rejected because they would shadow the aliases. An entry with
+``exclude_from_latest`` never takes part in the computed aliases, so registering it does not
+change what ``ppe_latest`` or ``ppe_n_latest`` resolve to (DECISIONS.md T-008: the
+Construction-PPE models are reached through their names and ``ppe_cppe_latest`` only).
+
+``aliases``, ``exclude_from_latest`` and an export's ``imgsz`` are written to the file only when
+they differ from their defaults, so entries that do not use them keep their exact JSON.
 
 Every path in the file is POSIX-style and relative to the repository root, which is the registry
 file's parent's parent (``models/registry.json`` -> the directory containing ``models/``). Writes
@@ -20,8 +29,9 @@ Public API:
 
 * :class:`RegistryEntry`, :class:`ExportEntry`: validated entry models.
 * :class:`ModelRegistry`: ``entries()``, ``names()``, ``aliases()``, ``get(name)``,
-  ``resolve(name)``, ``add(entry)``, ``add_export(name, fmt, path)``, ``save(entries)``,
-  ``verify(entry, fmt=None)``, ``resolve_path(entry, fmt=None)``, ``relative_path(path)``.
+  ``resolve(name)``, ``add(entry)``, ``add_export(name, fmt, path)``, ``set_alias(alias, name)``,
+  ``save(entries)``, ``verify(entry, fmt=None)``, ``resolve_path(entry, fmt=None)``,
+  ``relative_path(path)``.
 * :class:`RegistryError`: unknown names (listing what is available) and unreadable files.
 * :func:`sha256_file`, :func:`sha256_path`, :func:`atomic_write_text`.
 * :func:`class_names`, :func:`map_class_names`, :func:`coco_classes`: class-index mapping onto
@@ -48,8 +58,10 @@ from pydantic import (
     ConfigDict,
     Field,
     PlainSerializer,
+    SerializerFunctionWrapHandler,
     ValidationError,
     field_validator,
+    model_serializer,
     model_validator,
 )
 from typing_extensions import Self
@@ -159,6 +171,8 @@ class ExportEntry(BaseModel):
     sha256: str
     """Digest of the file, or of the directory as computed by :func:`sha256_path`."""
     created_at: UtcTimestamp
+    imgsz: int | None = Field(default=None, ge=32, le=8192)
+    """Fixed input size of the export (None: recorded before sizes were stored = the entry's)."""
 
     @field_validator("path")
     @classmethod
@@ -171,6 +185,23 @@ class ExportEntry(BaseModel):
     def _sha256(cls, value: str) -> str:
         """Digests are 64 lowercase hex characters."""
         return _sha256_hex(value)
+
+    @field_validator("imgsz")
+    @classmethod
+    def _imgsz(cls, value: int | None) -> int | None:
+        """Export sizes are multiples of the model stride (32)."""
+        if value is not None and value % 32:
+            raise ValueError("export imgsz must be a multiple of 32")
+        return value
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_size(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Leave ``imgsz`` out while it is None, so exports recorded before sizes keep their
+        exact JSON when the registry is rewritten."""
+        data: dict[str, Any] = handler(self)
+        if self.imgsz is None:
+            data.pop("imgsz", None)
+        return data
 
 
 class RegistryEntry(BaseModel):
@@ -198,6 +229,12 @@ class RegistryEntry(BaseModel):
     base: str | None = None
     """Base weights a fine-tune started from, when known."""
     exports: dict[ExportFormat, ExportEntry] = Field(default_factory=dict)
+    aliases: list[str] = Field(default_factory=list)
+    """Explicit alias names of this entry (e.g. ``ppe_cppe_latest``): unique across the registry
+    and resolved before the computed ``*_latest`` aliases."""
+    exclude_from_latest: bool = False
+    """Keep this entry out of the computed ``<role>_latest`` / ``<role>_<variant>_latest``
+    aliases (DECISIONS.md T-008)."""
 
     @field_validator("name")
     @classmethod
@@ -245,6 +282,18 @@ class RegistryEntry(BaseModel):
             raise ValueError("base must not be blank")
         return value
 
+    @field_validator("aliases")
+    @classmethod
+    def _aliases(cls, value: list[str]) -> list[str]:
+        """Aliases are names (same character rules) and appear once per entry."""
+        for alias in value:
+            if not _NAME_RE.match(alias):
+                raise ValueError(f"alias {alias!r} must match [A-Za-z0-9][A-Za-z0-9_.-]{{0,127}}")
+        duplicates = sorted({a for a in value if value.count(a) > 1})
+        if duplicates:
+            raise ValueError(f"aliases repeat {duplicates}")
+        return value
+
     @field_validator("metrics")
     @classmethod
     def _metrics(cls, value: dict[str, Any]) -> dict[str, Any]:
@@ -273,7 +322,20 @@ class RegistryEntry(BaseModel):
                 raise ValueError("imgsz of an image model must be a positive multiple of 32")
         if self.format in self.exports:
             raise ValueError(f"exports must not repeat the primary format {self.format!r}")
+        if self.name in self.aliases:
+            raise ValueError("an entry's aliases must differ from its name")
         return self
+
+    @model_serializer(mode="wrap")
+    def _omit_unused_alias_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Write ``aliases``/``exclude_from_latest`` only when set, so entries that do not use
+        them keep their exact JSON."""
+        data: dict[str, Any] = handler(self)
+        if not self.aliases:
+            data.pop("aliases", None)
+        if not self.exclude_from_latest:
+            data.pop("exclude_from_latest", None)
+        return data
 
     @property
     def version(self) -> str:
@@ -387,10 +449,30 @@ def coco_classes(names: Mapping[int, str] | Sequence[str]) -> list[str | None]:
 
 
 def _alias_names(entries: Sequence[RegistryEntry]) -> list[str]:
-    """Return every ``*_latest`` alias that resolves for ``entries``."""
-    aliases = {f"{e.role}{LATEST_SUFFIX}" for e in entries}
-    aliases |= {f"{e.role}_{e.variant}{LATEST_SUFFIX}" for e in entries if e.variant}
+    """Return every alias that resolves for ``entries``: computed ``*_latest`` and explicit."""
+    computed = [e for e in entries if not e.exclude_from_latest]
+    aliases = {f"{e.role}{LATEST_SUFFIX}" for e in computed}
+    aliases |= {f"{e.role}_{e.variant}{LATEST_SUFFIX}" for e in computed if e.variant}
+    aliases |= {alias for e in entries for alias in e.aliases}
     return sorted(aliases)
+
+
+def _alias_problems(entries: Sequence[RegistryEntry]) -> list[str]:
+    """Explicit aliases used by two entries or equal to an entry name (empty when consistent)."""
+    names = {e.name for e in entries}
+    owners: dict[str, list[str]] = {}
+    for entry in entries:
+        for alias in entry.aliases:
+            owners.setdefault(alias, []).append(entry.name)
+    problems = [
+        f"alias {alias!r} is claimed by {', '.join(who)}"
+        for alias, who in sorted(owners.items())
+        if len(who) > 1
+    ]
+    problems += [
+        f"alias {alias!r} equals an entry name" for alias in sorted(owners) if alias in names
+    ]
+    return problems
 
 
 def _format_validation(exc: ValidationError) -> str:
@@ -470,16 +552,20 @@ class ModelRegistry:
         return None
 
     def resolve(self, name: str) -> RegistryEntry:
-        """Resolve an exact name or a ``<role>_<variant>_latest`` / ``<role>_latest`` alias.
+        """Resolve an exact name, an explicit alias or a ``<role>_<variant>_latest`` /
+        ``<role>_latest`` alias (computed over the entries without ``exclude_from_latest``).
 
         Raises:
             RegistryError: When nothing matches; the message lists the available names.
         """
         entries = self.entries()
-        indexed = list(enumerate(entries))
-        for _, entry in indexed:
+        for entry in entries:
             if entry.name == name:
                 return entry
+        for entry in entries:
+            if name in entry.aliases:
+                return entry
+        indexed = [(i, e) for i, e in enumerate(entries) if not e.exclude_from_latest]
         if name.endswith(LATEST_SUFFIX):
             parts = name[: -len(LATEST_SUFFIX)].split("_")
             candidates: list[tuple[int, RegistryEntry]] = []
@@ -498,15 +584,19 @@ class ModelRegistry:
         )
 
     def save(self, entries: Sequence[RegistryEntry]) -> None:
-        """Atomically replace the registry with ``entries`` (names must be unique).
+        """Atomically replace the registry with ``entries`` (names and aliases must be unique).
 
         Raises:
-            RegistryError: When two entries share a name.
+            RegistryError: When two entries share a name, two entries claim the same explicit
+                alias or an alias equals an entry name.
         """
         names = [e.name for e in entries]
         duplicates = sorted({n for n in names if names.count(n) > 1})
         if duplicates:
             raise RegistryError(f"duplicate registry names: {duplicates}")
+        problems = _alias_problems(entries)
+        if problems:
+            raise RegistryError("invalid registry aliases: " + "; ".join(problems))
         payload = [e.model_dump(mode="json") for e in entries]
         text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
         with self._lock:
@@ -532,12 +622,13 @@ class ModelRegistry:
         *,
         created_at: datetime | None = None,
         sha256: str | None = None,
+        imgsz: int | None = None,
     ) -> RegistryEntry:
         """Record an export of entry ``name`` and return the updated entry.
 
         ``path`` may be absolute or relative to the current directory; it must lie inside the
         repository root and is stored relative to it. The digest is computed with
-        :func:`sha256_path` unless given.
+        :func:`sha256_path` unless given; ``imgsz`` is the export's fixed input size.
 
         Raises:
             RegistryError: When ``name`` is not an entry or ``path`` is outside the root.
@@ -550,10 +641,39 @@ class ModelRegistry:
             rel = self.relative_path(path)
             digest = sha256 if sha256 is not None else sha256_path(self._root / rel)
             stamp = created_at if created_at is not None else datetime.now(timezone.utc)
-            export = ExportEntry(path=rel, sha256=digest, created_at=stamp)
+            export = ExportEntry(path=rel, sha256=digest, created_at=stamp, imgsz=imgsz)
             updated = entry.with_export(fmt, export)
             self.add(updated)
             return updated
+
+    def set_alias(self, alias: str, name: str) -> RegistryEntry:
+        """Point the explicit ``alias`` at entry ``name`` and return the updated entry.
+
+        The alias is removed from whichever entry held it before, so it keeps a single owner;
+        both changes are written in one atomic save.
+
+        Raises:
+            RegistryError: When ``name`` is not an entry, or ``alias`` is an entry name.
+        """
+        with self._lock:
+            current = list(self._read())
+            names = [e.name for e in current]
+            if name not in names:
+                raise RegistryError(f"cannot set alias {alias!r}: no entry named {name!r}", names)
+            updated: list[RegistryEntry] = []
+            for entry in current:
+                kept = [a for a in entry.aliases if a != alias]
+                if entry.name == name:
+                    kept.append(alias)
+                data = {**entry.model_dump(), "aliases": kept}
+                try:
+                    updated.append(RegistryEntry.model_validate(data))
+                except ValidationError as exc:
+                    raise RegistryError(
+                        f"cannot set alias {alias!r}: {_format_validation(exc)}"
+                    ) from exc
+            self.save(updated)
+            return updated[names.index(name)]
 
     def resolve_path(self, entry: RegistryEntry, fmt: str | None = None) -> Path:
         """Return the absolute path of the primary weights or of the ``fmt`` export.
@@ -625,4 +745,7 @@ class ModelRegistry:
         duplicates = sorted({n for n in names if names.count(n) > 1})
         if duplicates:
             raise RegistryError(f"{self._path}: duplicate entry names {duplicates}")
+        problems = _alias_problems(entries)
+        if problems:
+            raise RegistryError(f"{self._path}: " + "; ".join(problems))
         return tuple(entries)

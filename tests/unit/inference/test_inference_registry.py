@@ -416,6 +416,41 @@ def test_add_export_records_relative_path_and_digest(
     assert not tmp_registry.verify(updated, "openvino")
 
 
+def test_add_export_records_the_export_size(
+    tmp_registry: ModelRegistry,
+    make_entry: Callable[..., RegistryEntry],
+    add_weights: Callable[..., RegistryEntry],
+) -> None:
+    add_weights(tmp_registry, make_entry(name="m"))
+    onnx = tmp_registry.root / "models" / "m.onnx"
+    updated = tmp_registry.add_export("m", "onnx", onnx, sha256="e" * 64)
+    assert updated.exports["onnx"].imgsz is None  # recorded before sizes were stored
+    sized = tmp_registry.add_export("m", "onnx", onnx, sha256="e" * 64, imgsz=320)
+    assert sized.exports["onnx"].imgsz == 320
+    raw = json.loads(tmp_registry.path.read_text(encoding="utf-8"))
+    assert raw[0]["exports"]["onnx"]["imgsz"] == 320
+
+
+@pytest.mark.parametrize("imgsz", [0, 16, 330, 9000])
+def test_export_sizes_are_validated(imgsz: int) -> None:
+    with pytest.raises(ValidationError):
+        ExportEntry(path="models/a.onnx", sha256="b" * 64, created_at=T0, imgsz=imgsz)
+
+
+def test_registries_written_before_export_sizes_still_load(
+    tmp_registry: ModelRegistry,
+    make_entry: Callable[..., RegistryEntry],
+    add_weights: Callable[..., RegistryEntry],
+) -> None:
+    add_weights(tmp_registry, make_entry(name="m"))
+    onnx = tmp_registry.root / "models" / "m.onnx"
+    tmp_registry.add_export("m", "onnx", onnx, sha256="e" * 64, imgsz=640)
+    raw = json.loads(tmp_registry.path.read_text(encoding="utf-8"))
+    del raw[0]["exports"]["onnx"]["imgsz"]
+    tmp_registry.path.write_text(json.dumps(raw), encoding="utf-8")
+    assert tmp_registry.resolve("m").exports["onnx"].imgsz is None
+
+
 def test_add_export_with_given_digest_and_cwd_relative_path(
     tmp_registry: ModelRegistry,
     make_entry: Callable[..., RegistryEntry],

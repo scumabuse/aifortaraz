@@ -37,3 +37,22 @@ specification (DECISIONS.md D-002).
 - [ ] M6 Packaging
 - [ ] M7 Verification
 - [ ] M8 Final polish
+
+## PPE training — Definition of Done (docs/TRAINING_SPEC.md 9.2)
+
+Adapted to the published release by DECISIONS.md T-001/T-002 (1,000 images, 800 train / 200 val, a
+100-image test split carved from train, 12 classes, no `none` class). Every item is ticked only with
+the command that proves it and the key lines of its output.
+
+- [ ] Dataset downloaded and verified: 800 / 200 images with labels (unified copy 700 / 200 / 100), all label lines valid, reports/data_stats.md written, 24 annotated samples inspected and described.
+- [ ] Unified copy built with the mapping of 5.1 (T-003); instance counts match source minus dropped classes (asserted by a test); no_vest decision (the spec's none decision, T-003) recorded with evidence; oversampling list built and reported.
+- [ ] R0 smoke passed end to end; R2 completed within its time box (and R1/R3 on GPU); results.csv, plots and best.pt saved; registry entries valid JSON with sha256.
+- [ ] Val report with per-class metrics, bare-class group, pairwise confusions, speed; test report for the production model only; thresholds.json with F1-optimal per-class values.
+- [ ] Error analysis with 100 dumped examples and at most five recommendations, at least one applied.
+- [ ] predict.py outputs the contract-shaped JSON for 12 test images; images inspected.
+- [ ] ONNX export verified (parity >= 0.9 mean IoU, counts +-1); OpenVINO / TensorRT exported where installable; bench.json written; CPU >= 8 FPS at 640 or at 512 with the reason.
+- [ ] Integration: safety-ai make check and e2e smoke green with models.ppe: ppe_cppe_latest.
+- [ ] notebooks/train_colab.ipynb executes in smoke mode via nbconvert; its remap cell is identical to remap.py (test).
+- [ ] docs/TRAINING.md, MODEL_CARD.md (dataset, licence, citation, metrics, intended use, limitations), README updated; every documented command executed during verification.
+- [ ] grep -rn "TODO\|FIXME\|NotImplementedError\|xfail\|skip(" <package> tests/ returns nothing.
+- [ ] DECISIONS.md complete; FINAL_REPORT.md written; PROGRESS.md says DONE with the final commit hash.

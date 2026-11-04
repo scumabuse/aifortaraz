@@ -1,0 +1,16 @@
+# The two product repositories keep their own git histories (integration spec 2).
+/aifortaraz/
+/safety-ai/
+
+# Secrets and local state
+.env
+.secrets/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+integration-tests/.tmp/
+reports/runtime/
+node_modules/

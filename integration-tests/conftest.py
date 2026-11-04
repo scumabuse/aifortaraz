@@ -121,11 +121,12 @@ class Backend:
 
 
 def start_backend(*, demo_mode: bool, demo_autostart: bool, extra_env: dict[str, str] | None = None,
-                  ai_mjpeg_port: int = 8001) -> Backend:
-    """Start a fresh website backend (temporary DB, seeded AI key, free port)."""
+                  ai_mjpeg_port: int = 8001, port: int | None = None) -> Backend:
+    """Start a fresh website backend (temporary DB, seeded AI key, a free port unless ``port`` is
+    given — the frontend dev server proxies to the fixed port 8000)."""
     data_dir = Path(tempfile.mkdtemp(prefix="it_backend_"))
     key = random_key(32)
-    port = free_port()
+    port = port or free_port()
     env = website_env({
         "JWT_SECRET": random_key(48),
         "SEED_AI_API_KEY": key,
